@@ -23,7 +23,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             fetch_button(app, ui);
 
+            let working = app.running.as_ref().map(|op| op.progress());
             match app.fetch_state.clone() {
+                _ if working.is_some() => {
+                    ui.label(RichText::new(working.unwrap_or_default()).small().color(pal.weak));
+                    ui.add(egui::Spinner::new().size(12.0));
+                }
                 FetchState::Running => {
                     ui.label(RichText::new("리모트 가져오는 중…").small().color(pal.weak));
                     ui.add(egui::Spinner::new().size(12.0));
@@ -53,7 +58,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 fn fetch_button(app: &mut App, ui: &mut egui::Ui) {
     let has_remotes = app.data.as_ref().is_some_and(|d| d.snap.has_remotes);
     let running = app.fetch_state == FetchState::Running;
-    let r = ui.add_enabled(has_remotes && !running, egui::Button::new("리모트 새로고침"));
+    let r = ui.add_enabled(has_remotes && !app.busy(), egui::Button::new("리모트 새로고침"));
     let hint = if !has_remotes {
         "이 저장소에는 리모트가 없어요".to_string()
     } else {
@@ -64,7 +69,13 @@ fn fetch_button(app: &mut App, ui: &mut egui::Ui) {
         };
         format!("리모트의 새 커밋과 브랜치를 가져와요 (git fetch, ⌘⇧R)\n내 브랜치와 작업 파일은 바뀌지 않아요{last}")
     };
-    let disabled_hint = if running { "리모트를 가져오는 중이에요" } else { "이 저장소에는 리모트가 없어요" };
+    let disabled_hint = if running {
+        "리모트를 가져오는 중이에요"
+    } else if app.running.is_some() {
+        "다른 작업이 끝난 뒤에 할 수 있어요"
+    } else {
+        "이 저장소에는 리모트가 없어요"
+    };
     if r.on_hover_text(hint).on_disabled_hover_text(disabled_hint).clicked() {
         app.fetch();
     }

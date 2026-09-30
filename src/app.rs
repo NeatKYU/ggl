@@ -10,8 +10,9 @@ use std::thread;
 use eframe::egui::{self, Frame, Key, Margin, Modifiers};
 use serde::{Deserialize, Serialize};
 
-use crate::git::{self, Details, Diff, FileChange, LoadRequest, Snapshot};
+use crate::git::{self, Details, Diff, FileChange, LoadRequest, RefLabel, Snapshot};
 use crate::graph::{self, Layout, OFFSCREEN};
+use crate::ops::{self, Item, Op};
 use crate::style::Palette;
 use crate::view;
 use crate::watcher::RepoWatcher;
@@ -82,8 +83,23 @@ pub enum FetchState {
     Failed(String),
 }
 
+/// 표 위에 띄우는 알림 (작업 실패 등). 닫기를 누르거나 다음 작업을 시작하면 사라진다.
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+    pub error: bool,
+}
+
+/// 커밋 행을 누른 기록. 더블클릭의 두 번째 클릭이 왔을 때 어느 커밋이었는지 알려준다.
+pub struct RowClick {
+    pub hash: String,
+    /// 브랜치·태그 라벨 위를 눌렀으면 그 라벨
+    pub label: Option<RefLabel>,
+}
+
 enum Reply {
     Fetched(PathBuf, Result<(), String>),
+    Done(PathBuf, Op, Result<(), String>),
     Loaded(u64, Result<Loaded, String>),
     Details(PathBuf, String, Result<Details, String>),
     Diff(PathBuf, String, String, Result<Diff, String>),
@@ -108,6 +124,13 @@ pub struct App {
     pub fetched_at: String,
     max_commits: usize,
     pub branch: Option<String>,
+
+    /// 지금 실행 중인 작업 (체크아웃, 머지 …). 한 번에 하나만 돌린다.
+    pub running: Option<Op>,
+    /// 실행 전에 확인 창으로 물어보는 중인 작업
+    pub confirm: Option<Item>,
+    pub notice: Option<Notice>,
+    pub row_click: Option<RowClick>,
 
     pub selected: Option<String>,
     pub details: Option<(String, Result<Details, String>)>,
@@ -149,6 +172,10 @@ impl App {
             fetched_at: String::new(),
             max_commits: INITIAL_LOAD,
             branch: None,
+            running: None,
+            confirm: None,
+            notice: None,
+            row_click: None,
             selected: None,
             details: None,
             diff: None,
@@ -192,6 +219,9 @@ impl App {
         self.fetch_state = FetchState::Idle;
         self.fetched_at.clear();
         self.max_commits = INITIAL_LOAD;
+        self.confirm = None;
+        self.notice = None;
+        self.row_click = None;
         self.close_details();
         self.search.clear();
         self.matches.clear();
@@ -243,7 +273,7 @@ impl App {
     /// (커밋 목록·상세·diff 작업이 기다리지 않게).
     pub fn fetch(&mut self) {
         let Some(repo) = self.repo.clone() else { return };
-        if self.fetch_state == FetchState::Running {
+        if self.busy() {
             return;
         }
         self.fetch_state = FetchState::Running;
@@ -253,6 +283,58 @@ impl App {
             let _ = tx.send(Reply::Fetched(repo, result));
             ctx.request_repaint();
         });
+    }
+
+    /// 저장소를 바꾸는 작업(리모트 새로고침 포함)이 돌고 있는지. 겹쳐서 돌리지 않는다.
+    pub fn busy(&self) -> bool {
+        self.running.is_some() || self.fetch_state == FetchState::Running
+    }
+
+    /// 메뉴나 더블클릭에서 고른 작업. 커밋 기록을 바꾸는 작업은 먼저 확인 창으로 물어본다.
+    pub fn request(&mut self, item: Item) {
+        if self.busy() {
+            return;
+        }
+        if item.op.needs_confirm() {
+            self.confirm = Some(item);
+        } else {
+            self.run_op(item.op);
+        }
+    }
+
+    /// 작업을 따로 스레드에서 실행한다 (풀은 네트워크라 오래 걸릴 수 있다).
+    pub fn run_op(&mut self, op: Op) {
+        let Some(repo) = self.repo.clone() else { return };
+        if self.busy() {
+            return;
+        }
+        self.notice = None;
+        self.running = Some(op.clone());
+        let (tx, ctx) = (self.reply_tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let result = ops::run(&repo, &op);
+            let _ = tx.send(Reply::Done(repo, op, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// 커밋 행을 더블클릭하면 그 커밋의 브랜치로 체크아웃한다.
+    /// 라벨 위였으면 그 브랜치로, 아니면 체크아웃할 브랜치가 하나로 정해질 때만.
+    pub fn double_click(&mut self, click: RowClick) {
+        let Some(data) = &self.data else { return };
+        let mut items = match &click.label {
+            Some(label) => ops::checkout(&data.snap, label).into_iter().collect(),
+            None => data.rows.get(&click.hash).map_or_else(Vec::new, |&row| ops::checkouts(&data.snap, row)),
+        };
+        if items.len() > 1 {
+            self.notice = Some(Notice {
+                title: "이 커밋에는 브랜치가 여러 개 있어요".into(),
+                body: "체크아웃할 브랜치의 라벨을 더블클릭하거나, 오른쪽 클릭 메뉴에서 골라주세요.".into(),
+                error: false,
+            });
+        } else if let Some(item) = items.pop() {
+            self.request(item);
+        }
     }
 
     /// 필터가 바뀌면 이전 결과는 버리고 처음부터 다시 불러온다.
@@ -389,6 +471,17 @@ impl App {
                         Err(e) => self.fetch_state = FetchState::Failed(e),
                     }
                 }
+                Reply::Done(repo, op, result) => {
+                    self.running = None;
+                    if self.repo.as_ref() != Some(&repo) {
+                        continue;
+                    }
+                    if let Err(body) = result {
+                        self.notice = Some(Notice { title: op.failed().into(), body, error: true });
+                    }
+                    // 실패해도 충돌 상태 등이 남을 수 있으니 항상 다시 읽는다.
+                    self.reload();
+                }
                 Reply::Loaded(generation, result) if generation == self.generation => {
                     self.loading = false;
                     self.refreshed_at = git::clock_now();
@@ -466,6 +559,10 @@ impl App {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // 확인 창이 떠 있으면 키는 그 창이 받는다 (Enter 실행, Esc 취소).
+        if self.confirm.is_some() {
+            return;
+        }
         let typing = ctx.memory(|m| m.focused().is_some());
         let (fetch, refresh, head, find, open, esc, up, down) = ctx.input_mut(|i| {
             (
@@ -531,6 +628,12 @@ impl eframe::App for App {
             .frame(Frame::new().fill(pal.bg).inner_margin(Margin::symmetric(10, 7)))
             .show(ui, |ui| view::toolbar::show(self, ui));
 
+        if view::ops::has_banner(self) {
+            egui::Panel::top("banner")
+                .frame(Frame::new().fill(pal.inline_bg).inner_margin(Margin::symmetric(10, 6)))
+                .show(ui, |ui| view::ops::banner(self, ui));
+        }
+
         // diff는 아래쪽에 가로 전체 폭으로 (위 경계를 끌어서 높이 조절)
         if self.diff.is_some() {
             let h = ui.available_height();
@@ -545,6 +648,8 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(pal.bg))
             .show(ui, |ui| view::table::show(self, ui));
+
+        view::ops::confirm(self, ui.ctx());
 
         #[cfg(feature = "screenshot")]
         crate::devshot::tick(self, ui);

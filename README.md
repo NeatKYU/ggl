@@ -1,13 +1,14 @@
 # ggl
 
 커밋 그래프를 가볍게 띄워두고 보는 macOS 앱입니다. VS Code 확장 [Git Graph](https://github.com/mhutchie/vscode-git-graph)처럼 보여줘요.
-*A lightweight, read-only commit graph viewer for macOS, inspired by the Git Graph extension for VS Code.*
+*A lightweight commit graph viewer for macOS, inspired by the Git Graph extension for VS Code.*
 
 ![ggl 화면](assets/screenshot.png)
 
-- **보기 전용이에요.** 체크아웃·머지 같은 명령은 없어요. 저장소에 무언가 쓰는 건 `리모트 새로고침`(git fetch)을 누를 때뿐이에요.
+- **보는 것만으로는 아무것도 바뀌지 않아요.** 저장소가 바뀌는 건 `리모트 새로고침`을 누르거나, 체크아웃·풀·머지·체리픽을 직접 골랐을 때뿐이에요.
 - **켜둘수록 좋게 만들었어요.** 저장소 파일이 바뀌면 자동으로 새로고침돼요. 가만히 있을 때 CPU는 0%예요.
 - **커밋 상세와 diff를 볼 수 있어요.** 커밋을 누르면 바로 아래에 상세가 펼쳐져요. 파일을 누르면 아래쪽에 diff가 열려요.
+- **자주 쓰는 브랜치 작업을 할 수 있어요.** 커밋을 더블클릭하면 그 브랜치로 체크아웃해요. 오른쪽 클릭하면 풀·머지·체리픽 메뉴가 나와요.
 
 > **비공식 앱이에요.** 원본 Git Graph 확장(mhutchie)과는 관계가 없어요. 원본 코드는 한 줄도 가져오지 않았고, 같은 동작을 Rust로 새로 만들었어요.
 
@@ -72,6 +73,16 @@ git tag v0.2.0 && git push origin v0.2.0
 - 바꾼 크기는 다음에 켤 때도 그대로예요.
 - 그래프 선은 펼쳐진 상세를 지나 아래 커밋까지 이어져요.
 
+**브랜치 작업 (더블클릭 · 오른쪽 클릭)**
+- 커밋을 더블클릭하면 그 커밋에 있는 브랜치로 체크아웃해요. 브랜치가 없는 커밋은 아무 일도 일어나지 않아요.
+- 브랜치가 여러 개인 커밋은 원하는 브랜치의 라벨을 더블클릭해요.
+- 리모트에만 있는 브랜치(`origin/topic`)를 더블클릭하면, 그 브랜치를 따라가는 로컬 브랜치(`topic`)를 만들어서 체크아웃해요.
+- 커밋을 오른쪽 클릭하면 메뉴가 나와요: 체크아웃, 현재 브랜치에 머지, 현재 브랜치에 체리픽, 풀, 해시 복사.
+- 풀은 현재 브랜치가 따라가는 리모트 브랜치가 있을 때만 나와요.
+- 풀·머지·체리픽은 실행할 git 명령을 보여주고 한 번 확인한 뒤에 실행해요. 체크아웃은 바로 실행해요.
+- 커밋 안 한 변경을 덮어쓰게 되는 체크아웃은 git이 거절하고, 파일은 그대로 남아요.
+- 충돌이 나면 git이 알려준 내용과 함께 `머지 취소`(체리픽이면 `체리픽 취소`) 버튼이 위쪽에 나와요. 누르면 시작하기 전 상태로 돌아가요. 충돌을 직접 해결하려면 편집기나 터미널에서 하면 돼요.
+
 **리모트 새로고침**
 - `git fetch --all --prune`을 실행해서 모든 리모트의 새 커밋·브랜치·태그를 가져와요.
 - 리모트에서 지워진 브랜치는 `origin/…` 라벨에서도 없어져요.
@@ -115,7 +126,7 @@ git tag v0.2.0 && git push origin v0.2.0
 
 - `.git` 안에서는 `HEAD`, `index`, `config`, `packed-refs`, `refs/*`만 봅니다.
 - `node_modules`, `build`, `.dart_tool`, `target` 같은 빌드 폴더의 변경은 무시합니다.
-- git 명령에 항상 `--no-optional-locks`를 붙여서, 앱이 `.git/index`를 건드리지 않게 합니다. 그래서 터미널에서 하는 git 작업과 부딪히지 않아요.
+- 저장소를 읽는 git 명령에는 항상 `--no-optional-locks`를 붙여서, 화면을 그리느라 `.git/index`를 건드리지 않게 합니다. 그래서 터미널에서 하는 git 작업과 부딪히지 않아요.
 
 ## 구조
 
@@ -125,9 +136,10 @@ src/
 ├─ app.rs       상태, 백그라운드 작업 스레드, 단축키
 ├─ git.rs       git 명령 실행 + 파싱 (log, show-ref, reflog, status, diff)
 ├─ graph.rs     레인·색·선 배치 계산
+├─ ops.rs       체크아웃·풀·머지·체리픽: 어느 커밋에서 무엇을 할 수 있는지 + 실행
 ├─ watcher.rs   파일 감시 → 자동 새로고침
 ├─ style.rs     폰트(macOS 시스템 폰트를 메모리 매핑), 테마, 색
-└─ view/        toolbar.rs · table.rs(표+그래프) · details.rs(인라인 상세) · diff.rs
+└─ view/        toolbar.rs · table.rs(표+그래프) · details.rs(인라인 상세) · diff.rs · ops.rs(메뉴·확인 창·알림)
 ```
 
 - Rust와 [egui](https://github.com/emilk/egui)(eframe, Metal 렌더러)로 만들었어요.
@@ -155,7 +167,7 @@ src/
 
 ```sh
 cargo run -- ~/some/repo       # 실행
-cargo test                     # 파서·그래프·파일 감시 규칙 테스트
+cargo test                     # 파서·그래프·파일 감시 규칙 + 브랜치 작업(임시 저장소에서 실제 git 실행) 테스트
 
 # 화면 캡처 (화면 기록 권한 없이 앱이 직접 PNG 저장 후 종료)
 GGL_SHOT=out.png GGL_THEME=dark GGL_SELECT=3 GGL_DIFF=0 cargo run --features screenshot -- ~/some/repo

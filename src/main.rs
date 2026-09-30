@@ -1,10 +1,11 @@
-//! ggl — VS Code 확장 Git Graph처럼 커밋 그래프를 보여주는 가벼운 보기 전용 앱
+//! ggl — VS Code 확장 Git Graph처럼 커밋 그래프를 보여주는 가벼운 앱
 
 mod app;
 #[cfg(feature = "screenshot")]
 mod devshot;
 mod git;
 mod graph;
+mod ops;
 mod style;
 mod view;
 mod watcher;

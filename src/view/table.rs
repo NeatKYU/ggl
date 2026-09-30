@@ -1,19 +1,21 @@
 //! 가운데 표: 그래프 | 설명(라벨 + 메시지) | 날짜 | 작성자 | 커밋
 //! 커밋을 누르면 그 행 바로 아래에 상세가 펼쳐진다 (원본 Git Graph의 인라인 상세).
+//! 더블클릭하면 그 커밋의 브랜치로 체크아웃하고, 오른쪽 클릭하면 작업 메뉴가 나온다.
 //! 화면에 보이는 행만 그린다.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Galley, Id, Painter, Pos2, Rangef, Rect, RichText,
-    ScrollArea, Sense, Shape, Stroke, StrokeKind, pos2, vec2,
+    self, Align2, Color32, CornerRadius, FontId, Galley, Id, Painter, PointerButton, Pos2, Rangef, Rect,
+    RichText, ScrollArea, Sense, Shape, Stroke, StrokeKind, pos2, vec2,
 };
 use eframe::epaint::CubicBezierShape;
 use eframe::epaint::text::{LayoutJob, TextFormat, TextWrapping};
 use std::sync::Arc;
 
-use crate::app::{App, Loaded, ScrollTo};
+use crate::app::{App, Loaded, RowClick, ScrollTo};
 use crate::git::{RefKind, RefLabel, RowKind};
+use crate::ops::Item;
 use crate::style::{self, LABEL, Palette, SMALL, TEXT, graph_color};
-use crate::view::details;
+use crate::view::{details, ops};
 
 pub const ROW_H: f32 = 24.0;
 const HEADER_H: f32 = 26.0;
@@ -87,7 +89,9 @@ impl Rows {
 }
 
 enum Action {
-    Select(String, usize),
+    /// 누른 커밋, 행 번호, 그리고 라벨 위를 눌렀으면 그 라벨
+    Select(String, usize, Option<RefLabel>),
+    Request(Item),
     LoadMore,
     Details(details::Action),
 }
@@ -113,6 +117,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let view_height = (full.height() - HEADER_H).max(ROW_H);
     let current_match = app.matches.get(app.match_pos).copied();
     let open_row = app.selected_row();
+    let busy = app.busy();
     // 상세 높이는 화면을 넘지 않게
     let max_extra = (view_height - ROW_H * 2.0).max(140.0);
     let mut extra = app.settings.details_height.clamp(120.0, max_extra);
@@ -178,7 +183,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let is_open = open_row == Some(row);
             let bg = if is_open {
                 Some(pal.selected)
-            } else if resp.hovered() {
+            } else if resp.hovered() || resp.context_menu_opened() {
                 Some(pal.hover)
             } else {
                 None
@@ -194,12 +199,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             } else if !is_open && app.matches.binary_search(&row).is_ok() {
                 painter.rect_filled(rect, 0.0, pal.found);
             }
-            if resp.clicked() {
-                action = Some(Action::Select(commit.hash.clone(), row));
-            }
 
-            let node_color = graph_color(data.layout.nodes[row].color);
-            paint_description(&painter, &cols, rect, data, row, node_color, &pal);
+            let on_label = paint_description(&painter, &cols, rect, data, row, resp.hover_pos(), &pal);
+            if resp.clicked() {
+                action = Some(Action::Select(commit.hash.clone(), row, on_label.cloned()));
+            }
+            resp.context_menu(|ui| {
+                if let Some(item) = ops::row_menu(ui, &data.snap, row, busy) {
+                    action = Some(Action::Request(item));
+                }
+            });
             let cy = rect.center().y;
             if let Some(date) = cols.date {
                 cell(&painter, date, cy, &commit.date, FontId::proportional(TEXT), pal.weak);
@@ -241,8 +250,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if split != split_before {
         app.settings.details_split = split;
     }
+
+    let (clicked, double) = ui.input(|i| {
+        (i.pointer.primary_clicked(), i.pointer.button_double_clicked(PointerButton::Primary))
+    });
+    // 더블클릭의 두 번째 클릭. 첫 클릭으로 상세가 펼쳐지면서 행이 밀렸을 수 있으니,
+    // 지금 커서 아래가 아니라 첫 클릭이 누른 커밋으로 체크아웃한다. 이 클릭은 다른 일을 하지 않는다.
+    if double {
+        if let Some(click) = app.row_click.take() {
+            app.double_click(click);
+            return;
+        }
+    }
+    if clicked {
+        app.row_click = match &action {
+            Some(Action::Select(hash, _, label)) => Some(RowClick { hash: hash.clone(), label: label.clone() }),
+            _ => None,
+        };
+    }
     match action {
-        Some(Action::Select(hash, row)) => {
+        Some(Action::Select(hash, row, _)) => {
             if app.selected.as_ref() == Some(&hash) {
                 app.close_details();
             } else {
@@ -251,6 +278,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.scroll_to = Some(ScrollTo::Reveal(row));
             }
         }
+        Some(Action::Request(item)) => app.request(item),
         Some(Action::LoadMore) => app.load_more(),
         Some(Action::Details(a)) => details::apply(app, a),
         None => {}
@@ -289,17 +317,32 @@ pub fn truncated(p: &Painter, text: &str, font: FontId, color: Color32, width: f
     p.layout_job(job)
 }
 
-fn paint_description(p: &Painter, cols: &Columns, rect: Rect, data: &Loaded, row: usize, color: Color32, pal: &Palette) {
+/// 라벨과 커밋 메시지를 그린다. 커서(`pointer`)가 라벨 위에 있으면 그 라벨을 돌려준다.
+fn paint_description<'a>(
+    p: &Painter,
+    cols: &Columns,
+    rect: Rect,
+    data: &'a Loaded,
+    row: usize,
+    pointer: Option<Pos2>,
+    pal: &Palette,
+) -> Option<&'a RefLabel> {
     let commit = &data.snap.commits[row];
+    let color = graph_color(data.layout.nodes[row].color);
     let cy = rect.center().y;
     let right = cols.desc.max - 8.0;
     let mut x = cols.desc.min + 8.0;
+    let mut hovered = None;
     if let Some(labels) = data.snap.refs.get(&commit.hash) {
         for label in labels {
             if x > right - 40.0 {
                 break;
             }
-            x = paint_label(p, x, cy, label, color, pal) + 5.0;
+            let end = paint_label(p, x, cy, label, color, pal);
+            if pointer.is_some_and(|m| (x..end).contains(&m.x) && (m.y - cy).abs() <= LABEL_H / 2.0) {
+                hovered = Some(label);
+            }
+            x = end + 5.0;
         }
     }
     let (text_color, italics) = match commit.kind {
@@ -310,6 +353,7 @@ fn paint_description(p: &Painter, cols: &Columns, rect: Rect, data: &Loaded, row
     };
     let g = truncated(p, &commit.subject, FontId::proportional(TEXT), text_color, right - x, italics);
     p.galley(pos2(x, cy - g.size().y / 2.0), g, text_color);
+    hovered
 }
 
 /// 브랜치·태그 라벨을 그리고 오른쪽 끝 x를 돌려준다.

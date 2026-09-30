@@ -1,12 +1,14 @@
 //! git 명령을 실행하고 결과를 파싱한다.
 //!
-//! 모든 명령에 `--no-optional-locks`를 붙여서 이 앱이 저장소에 아무것도 쓰지 않게 한다.
+//! 읽는 명령에는 모두 `--no-optional-locks`를 붙여서 화면을 그리는 것만으로는 저장소에 아무것도 쓰지 않게 한다.
 //! (`git status`가 `.git/index`를 갱신하면 파일 감시가 다시 새로고침을 부르는 루프가 생긴다.)
+//! 저장소를 바꾸는 명령(fetch, checkout, merge …)은 `run`으로만 실행한다.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 /// git 출력 필드 구분자 (ASCII Unit Separator). 커밋 메시지에 나올 일이 없다.
@@ -56,6 +58,14 @@ pub struct LoadRequest {
     pub show_remotes: bool,
 }
 
+/// 충돌 등으로 중간에 멈춰 있는 작업
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InProgress {
+    Merge,
+    CherryPick,
+    Rebase,
+}
+
 #[derive(Debug, Default)]
 pub struct Snapshot {
     /// 화면에 표시될 순서 그대로 (맨 위 = 0)
@@ -63,6 +73,9 @@ pub struct Snapshot {
     pub refs: HashMap<String, Vec<RefLabel>>,
     pub head: Option<String>,
     pub head_branch: Option<String>,
+    /// 현재 브랜치가 따라가는 리모트 브랜치 (예: origin/main). 없으면 풀을 할 수 없다.
+    pub upstream: Option<String>,
+    pub in_progress: Option<InProgress>,
     pub more: bool,
     /// 브랜치 필터 목록 (로컬 먼저, 그다음 리모트)
     pub branches: Vec<String>,
@@ -110,44 +123,86 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+/// 네트워크를 쓰는 명령(fetch, pull)이 기다리는 최대 시간
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 리모트 새로고침 (`git fetch --all --prune`).
-/// 리모트 추적 브랜치(origin/…)와 태그만 바뀌고, 내 브랜치와 작업 파일은 그대로다.
-/// 비밀번호를 물어보면 기다리지 않고 실패하고, 너무 오래 걸리면 중단한다.
-pub fn fetch(repo: &Path) -> Result<(), String> {
+/// 저장소를 바꾸는 명령을 실행한다.
+/// 비밀번호나 편집기를 기다리며 멈추지 않게 하고, `timeout`이 지나면 중단한다.
+/// 실패하면 git이 남긴 말을 돌려준다 (충돌 안내는 stdout으로 나온다).
+pub fn run(repo: &Path, args: &[&str], timeout: Option<Duration>) -> Result<(), String> {
     let mut child = Command::new("git")
         .args(["-c", "color.ui=false", "-C"])
         .arg(repo)
-        .args(["fetch", "--all", "--prune", "--quiet"])
+        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_MERGE_AUTOEDIT", "no")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("git을 실행할 수 없어요: {e}"))?;
-    let deadline = Instant::now() + FETCH_TIMEOUT;
+    // 출력이 길어도 파이프가 막히지 않게 따로 읽는다.
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let deadline = timeout.map(|t| Instant::now() + t);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() > deadline => {
+            Ok(None) if deadline.is_some_and(|d| Instant::now() > d) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("2분이 지나도 끝나지 않아서 중단했어요 (네트워크나 인증을 확인해주세요)".into());
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => return Err(e.to_string()),
         }
     };
     if status.success() {
         return Ok(());
     }
-    let mut err = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_string(&mut err);
-    }
-    let err = err.trim();
-    Err(if err.is_empty() { "리모트를 가져오지 못했어요".into() } else { err.to_string() })
+    // git이 띄운 다른 프로세스(ssh 등)가 파이프를 쥐고 있을 수 있어서 오래 기다리지 않는다.
+    let text = |rx: Receiver<String>| rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    let (out, err) = (text(out), text(err));
+    let parts: Vec<&str> = [out.trim(), err.trim()].into_iter().filter(|s| !s.is_empty()).collect();
+    Err(parts.join("\n"))
+}
+
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    rx
+}
+
+/// 리모트 새로고침 (`git fetch --all --prune`).
+/// 리모트 추적 브랜치(origin/…)와 태그만 바뀌고, 내 브랜치와 작업 파일은 그대로다.
+/// 비밀번호를 물어보면 기다리지 않고 실패하고, 너무 오래 걸리면 중단한다.
+pub fn fetch(repo: &Path) -> Result<(), String> {
+    run(repo, &["fetch", "--all", "--prune", "--quiet"], Some(NETWORK_TIMEOUT))
+        .map_err(|e| if e.is_empty() { "리모트를 가져오지 못했어요".into() } else { e })
+}
+
+/// `ancestor`가 `of`의 조상(또는 같은 커밋)인지
+pub fn is_ancestor(repo: &Path, ancestor: &str, of: &str) -> bool {
+    git(repo, &["merge-base", "--is-ancestor", ancestor, of]).is_ok()
+}
+
+/// 끝나지 않은 머지·체리픽·리베이스가 있는지 (git이 남겨둔 표시 파일로 안다)
+fn in_progress(repo: &Path) -> Option<InProgress> {
+    let dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"]).ok()?.trim());
+    [
+        ("MERGE_HEAD", InProgress::Merge),
+        ("CHERRY_PICK_HEAD", InProgress::CherryPick),
+        ("REBASE_HEAD", InProgress::Rebase),
+    ]
+    .into_iter()
+    .find_map(|(file, state)| dir.join(file).exists().then_some(state))
 }
 
 /// 폴더 안의 git 저장소 최상위 경로를 찾는다.
@@ -168,6 +223,13 @@ pub fn load(req: &LoadRequest) -> Result<Snapshot, String> {
     };
 
     snap.has_remotes = git(repo, &["remote"]).is_ok_and(|s| !s.trim().is_empty());
+    snap.in_progress = in_progress(repo);
+    if snap.head_branch.is_some() {
+        snap.upstream = git(repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
 
     // 브랜치·태그 위치. 커밋이 하나도 없는 저장소에서는 실패하므로 빈 결과로 둔다.
     let show_ref = git(repo, &["show-ref", "-d", "--head"]).unwrap_or_default();
