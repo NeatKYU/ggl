@@ -1,0 +1,5 @@
+#!/bin/sh
+# 터미널에서 저장소 열기:  ggl-open [폴더]   (폴더를 안 주면 현재 폴더)
+# (oh-my-zsh는 `ggl`을 git pull 단축어로 쓰기 때문에 명령 이름을 ggl-open으로 했다)
+dir="$(cd "${1:-.}" && pwd)" || exit 1
+exec open -n -a "ggl" --args "$dir"

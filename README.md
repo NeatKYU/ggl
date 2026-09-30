@@ -1,0 +1,154 @@
+# ggl
+
+커밋 그래프를 가볍게 띄워두고 보는 macOS 앱입니다. VS Code 확장 [Git Graph](https://github.com/mhutchie/vscode-git-graph)처럼 보여줘요.
+*A lightweight, read-only commit graph viewer for macOS, inspired by the Git Graph extension for VS Code.*
+
+![ggl 화면](assets/screenshot.png)
+
+- **보기 전용이에요.** 체크아웃·머지 같은 명령은 없어요. 저장소에 무언가 쓰는 건 `리모트 새로고침`(git fetch)을 누를 때뿐이에요.
+- **켜둘수록 좋게 만들었어요.** 저장소 파일이 바뀌면 자동으로 새로고침돼요. 가만히 있을 때 CPU는 0%예요.
+- **커밋 상세와 diff를 볼 수 있어요.** 커밋을 누르면 바로 아래에 상세가 펼쳐져요. 파일을 누르면 아래쪽에 diff가 열려요.
+
+> **비공식 앱이에요.** 원본 Git Graph 확장(mhutchie)과는 관계가 없어요. 원본 코드는 한 줄도 가져오지 않았고, 같은 동작을 Rust로 새로 만들었어요.
+
+## 설치
+
+### 받아서 쓰기
+
+1. [Releases](../../releases/latest)에서 `ggl-…-macos-universal.zip`을 받아 압축을 풀어요. Apple Silicon과 Intel 모두 지원해요.
+2. `ggl.app`을 `응용 프로그램` 폴더로 옮겨요.
+3. 처음 열 때 macOS가 "Apple에서 확인할 수 없음"이라고 막으면, `시스템 설정 → 개인정보 보호 및 보안`에서 **그래도 열기**를 눌러요.
+   터미널에서 `xattr -dr com.apple.quarantine /Applications/ggl.app`을 실행해도 돼요.
+   Apple 개발자 서명이 없는 앱이라 처음 한 번만 필요해요.
+
+**터미널에서 열기 (선택):** [`scripts/ggl-open`](scripts/ggl-open)을 PATH에 있는 폴더에 복사하면, `ggl-open .`으로 현재 폴더의 저장소를 열 수 있어요.
+명령 이름이 `ggl`이 아닌 이유는, oh-my-zsh가 `ggl`을 `git pull` 단축어로 쓰기 때문이에요.
+
+### 직접 빌드하기
+
+[Rust](https://rustup.rs)가 필요해요.
+
+```sh
+./bundle.sh --install      # 빌드 → ~/Applications/ggl.app, ~/.local/bin/ggl-open 설치
+./bundle.sh --universal    # Apple Silicon + Intel 겸용으로 빌드
+./bundle.sh --zip          # 배포용 zip도 만들기 (dist/)
+```
+
+### 새 버전 배포 (관리자용)
+
+`v`로 시작하는 태그를 올리면 GitHub Actions가 Apple Silicon·Intel 겸용 앱을 빌드해서 Releases에 올려요.
+
+```sh
+# Cargo.toml의 version을 올린 뒤
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+## 화면
+
+| 영역 | 내용 |
+|---|---|
+| 위쪽 | 저장소 선택(최근 10개), 브랜치 필터, 리모트 브랜치 표시, 검색, 리모트 새로고침, 새로고침 |
+| 가운데 | 그래프 · 설명(브랜치/태그 라벨 + 메시지) · 날짜 · 작성자 · 커밋 |
+| 커밋 아래 | 커밋을 누르면 그 행 바로 아래에 상세가 펼쳐져요 (원본 Git Graph와 같은 방식) |
+| 아래쪽 | 상세의 파일을 누르면 그 파일의 변경 내용(diff)이 가로 전체 폭으로 열려요 |
+
+**커밋 상세 (인라인)**
+- 왼쪽 칸에는 메시지, 커밋 해시, 부모, 작성자, 날짜가 있어요. 부모 해시를 누르면 그 커밋으로 이동해요.
+- 오른쪽 칸에는 변경된 파일과 +/− 줄 수가 있어요.
+- 가운데 세로선을 끌면 두 칸의 넓이가 바뀌어요.
+- 아래 테두리를 끌면 높이가 바뀌어요.
+- 바꾼 크기는 다음에 켤 때도 그대로예요.
+- 그래프 선은 펼쳐진 상세를 지나 아래 커밋까지 이어져요.
+
+**리모트 새로고침**
+- `git fetch --all --prune`을 실행해서 모든 리모트의 새 커밋·브랜치·태그를 가져와요.
+- 리모트에서 지워진 브랜치는 `origin/…` 라벨에서도 없어져요.
+- 바뀌는 건 리모트 추적 브랜치(`origin/…`)뿐이고, 내 브랜치와 작업 파일은 그대로예요.
+- 네트워크 작업이라 따로 돌아가요. 가져오는 동안에도 화면은 멈추지 않아요.
+- 비밀번호를 물어보는 상황이면 기다리지 않고 바로 실패해요. 2분이 넘으면 중단해요.
+- 실패하면 위쪽에 빨간 글씨로 표시되고, 마우스를 올리면 git 오류가 보여요.
+
+**diff (아래쪽 패널)**
+- 추가된 줄은 초록, 지워진 줄은 빨강으로 표시되고, 양쪽 줄 번호가 나와요.
+- 줄 번호 칸은 가로로 스크롤해도 왼쪽에 고정돼요.
+- `◂ 이전` / `다음 ▸`으로 같은 커밋의 다른 파일로 넘어가요.
+- 패널 위 경계를 끌면 높이가 바뀌어요. 열 때 선택한 커밋이 가려지지 않게 자동으로 스크롤돼요.
+- 머지 커밋과 스태시는 첫 번째 부모와 비교해요. 커밋 안 된 변경은 HEAD와 비교해요.
+- 추적 안 되는 새 파일은 파일 전체를 "추가"로 보여줘요.
+
+그래프 표시는 원본 Git Graph 기본값을 따릅니다.
+
+- ◯ 속이 빈 원: 현재 HEAD
+- ◎ 이중 원: 스태시
+- 회색 점선: 커밋 안 된 변경
+- 흐린 글씨: 머지 커밋
+- 꽉 찬 라벨: 체크아웃된 브랜치
+- `main | origin`: 로컬 브랜치와 리모트 브랜치가 같은 커밋이라 하나로 합친 라벨
+
+## 단축키
+
+| 키 | 동작 |
+|---|---|
+| `⌘R` | 새로고침 (로컬 저장소 다시 읽기) |
+| `⌘⇧R` | 리모트 새로고침 (`git fetch --all --prune`) |
+| `⌘F` | 검색 (`Enter` 다음 결과, `Shift+Enter` 이전 결과, `Esc` 지우기) |
+| `⌘H` | HEAD로 이동 |
+| `⌘O` | 폴더 열기 |
+| `↑` `↓` | 커밋 선택 이동 |
+| `Esc` | diff 닫기 → 한 번 더 누르면 상세 닫기 |
+
+## 자동 새로고침
+
+저장소 파일이 바뀌면 750ms 기다렸다가 한 번 다시 불러옵니다. 원본 Git Graph와 같은 규칙이에요.
+
+- `.git` 안에서는 `HEAD`, `index`, `config`, `packed-refs`, `refs/*`만 봅니다.
+- `node_modules`, `build`, `.dart_tool`, `target` 같은 빌드 폴더의 변경은 무시합니다.
+- git 명령에 항상 `--no-optional-locks`를 붙여서, 앱이 `.git/index`를 건드리지 않게 합니다. 그래서 터미널에서 하는 git 작업과 부딪히지 않아요.
+
+## 구조
+
+```
+src/
+├─ main.rs      창 띄우기, PATH 보정
+├─ app.rs       상태, 백그라운드 작업 스레드, 단축키
+├─ git.rs       git 명령 실행 + 파싱 (log, show-ref, reflog, status, diff)
+├─ graph.rs     레인·색·선 배치 계산
+├─ watcher.rs   파일 감시 → 자동 새로고침
+├─ style.rs     폰트(macOS 시스템 폰트를 메모리 매핑), 테마, 색
+└─ view/        toolbar.rs · table.rs(표+그래프) · details.rs(인라인 상세) · diff.rs
+```
+
+- Rust와 [egui](https://github.com/emilk/egui)(eframe, Metal 렌더러)로 만들었어요.
+- git 명령은 백그라운드 스레드에서 실행합니다.
+- 화면에 보이는 행만 그립니다.
+- 입력이나 변경이 없으면 다시 그리지 않아서, 가만히 있을 때 CPU는 0%예요.
+
+## 메모리
+
+`footprint` 명령으로 잰 값이에요. 실제 저장소, 1100×720 창, 레티나 화면 기준이고 편차는 ±8MB 정도예요.
+
+| | 메모리 |
+|---|---|
+| 이 앱 | 70~90MB |
+| egui 최소 창 (글자 하나) | 65~75MB |
+| macOS 네이티브(AppKit) 최소 창 | 17MB |
+
+- 가장 큰 부분은 창 전체를 GPU로 그리기 위한 화면 버퍼 2장(약 28MB)이에요. 창이 클수록 커져요.
+- 그다음은 Metal·AppKit 같은 시스템 라이브러리예요.
+- 커밋 데이터·그래프·글자 캐시가 쓰는 건 5~10MB예요.
+- 글자 캐시는 최대 약 16MB로 제한해서, 오래 켜둬도 불어나지 않아요.
+- OpenGL 렌더러는 106MB로 더 무거웠어요. 화면 버퍼 수 줄이기(`LOW_LATENCY`)는 효과가 없었어요.
+
+## 개발
+
+```sh
+cargo run -- ~/some/repo       # 실행
+cargo test                     # 파서·그래프·파일 감시 규칙 테스트
+
+# 화면 캡처 (화면 기록 권한 없이 앱이 직접 PNG 저장 후 종료)
+GGL_SHOT=out.png GGL_THEME=dark GGL_SELECT=3 GGL_DIFF=0 cargo run --features screenshot -- ~/some/repo
+# GGL_SCROLL=2000 : 2000행까지 스크롤하며 그려본 뒤 글자 캐시 크기를 출력
+```
+
+원본 Git Graph의 라이선스는 파생물 배포를 허용하지 않아요. 그래서 원본 코드를 가져오지 않고 같은 동작을 새로 구현했어요.
+원본에서 가져온 건 기본 설정값(색 팔레트, 행 높이, 자동 새로고침 규칙)뿐이에요.

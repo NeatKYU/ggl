@@ -1,0 +1,25 @@
+[package]
+name = "ggl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Metal(wgpu) 렌더러: OpenGL보다 메모리를 약 35MB 덜 쓴다 (macOS 화면 버퍼가 작음)
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "default_fonts", "persistence"] }
+libc = "0.2.189"
+memmap2 = "0.9.11"
+notify = "8.2.0"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# 개발용: GGL_SHOT=파일.png 로 실행하면 화면을 저장하고 종료한다.
+[features]
+screenshot = ["dep:image"]

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- 배경을 캔버스 전체에 채운다. 모서리 둥글리기는 macOS가 한다 (여백을 두면 하얀 테두리가 생김). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2d31"/>
+      <stop offset="1" stop-color="#16171a"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+  <g transform="translate(512 512) scale(1.12) translate(-512 -515)">
+    <g fill="none" stroke-width="44" stroke-linecap="round">
+      <path d="M400 250 V780" stroke="#0085d9"/>
+      <path d="M400 320 C400 410 640 370 640 450 V610 C640 690 400 650 400 720" stroke="#d9008f"/>
+    </g>
+    <g stroke="#1b1c1f" stroke-width="16">
+      <circle cx="400" cy="250" r="54" fill="#1b1c1f" stroke="#0085d9" stroke-width="30"/>
+      <circle cx="640" cy="450" r="50" fill="#d9008f"/>
+      <circle cx="640" cy="610" r="50" fill="#d9008f"/>
+      <circle cx="400" cy="530" r="50" fill="#0085d9"/>
+      <circle cx="400" cy="780" r="50" fill="#0085d9"/>
+    </g>
+  </g>
+</svg>
