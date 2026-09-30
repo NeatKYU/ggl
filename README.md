@@ -15,13 +15,24 @@
 
 ### 받아서 쓰기
 
-1. [Releases](../../releases/latest)에서 `ggl-…-macos-universal.zip`을 받아 압축을 풀어요. Apple Silicon과 Intel 모두 지원해요.
-2. `ggl.app`을 `응용 프로그램` 폴더로 옮겨요.
+**터미널 한 줄로 설치 (추천).** Apple Silicon과 Intel 모두 지원해요.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/NeatKYU/ggl/main/install.sh | sh
+```
+
+- `/Applications/ggl.app`과 터미널 명령 `~/.local/bin/ggl-open`을 설치해요. 다시 실행하면 최신 버전으로 바뀌어요.
+- 이 방법은 macOS의 "확인되지 않은 개발자" 경고가 뜨지 않아요. 터미널로 받은 파일에는 격리 표시가 붙지 않기 때문이에요.
+
+**디스크 이미지로 설치.**
+
+1. [Releases](../../releases/latest)에서 `ggl-…-macos-universal.dmg`를 받아서 열어요.
+2. `ggl.app`을 옆의 `Applications` 폴더로 끌어다 놓아요.
 3. 처음 열 때 macOS가 "Apple에서 확인할 수 없음"이라고 막으면, `시스템 설정 → 개인정보 보호 및 보안`에서 **그래도 열기**를 눌러요.
    터미널에서 `xattr -dr com.apple.quarantine /Applications/ggl.app`을 실행해도 돼요.
    Apple 개발자 서명이 없는 앱이라 처음 한 번만 필요해요.
 
-**터미널에서 열기 (선택):** [`scripts/ggl-open`](scripts/ggl-open)을 PATH에 있는 폴더에 복사하면, `ggl-open .`으로 현재 폴더의 저장소를 열 수 있어요.
+**터미널에서 열기:** `ggl-open .`으로 현재 폴더의 저장소를 열 수 있어요. 디스크 이미지로 설치했다면 [`scripts/ggl-open`](scripts/ggl-open)을 PATH에 있는 폴더에 복사하면 돼요.
 명령 이름이 `ggl`이 아닌 이유는, oh-my-zsh가 `ggl`을 `git pull` 단축어로 쓰기 때문이에요.
 
 ### 직접 빌드하기
@@ -32,6 +43,7 @@
 ./bundle.sh --install      # 빌드 → ~/Applications/ggl.app, ~/.local/bin/ggl-open 설치
 ./bundle.sh --universal    # Apple Silicon + Intel 겸용으로 빌드
 ./bundle.sh --zip          # 배포용 zip도 만들기 (dist/)
+./bundle.sh --dmg          # 배포용 디스크 이미지도 만들기 (dist/)
 ```
 
 ### 새 버전 배포 (관리자용)

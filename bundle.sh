@@ -3,15 +3,17 @@
 #   ./bundle.sh               → dist/ggl.app (이 맥의 칩용)
 #   ./bundle.sh --universal   → Apple Silicon + Intel 겸용
 #   ./bundle.sh --zip         → 배포용 dist/ggl-<버전>-macos-<칩>.zip 도 만들기
+#   ./bundle.sh --dmg         → 배포용 dist/ggl-<버전>-macos-<칩>.dmg 도 만들기
 #   ./bundle.sh --install     → ~/Applications 에 설치 + 터미널 명령(ggl-open) 설치
 set -euo pipefail
 cd "$(dirname "$0")"
 
-UNIVERSAL=0 ZIP=0 INSTALL=0
+UNIVERSAL=0 ZIP=0 DMG=0 INSTALL=0
 for arg in "$@"; do
   case "$arg" in
     --universal) UNIVERSAL=1 ;;
     --zip) ZIP=1 ;;
+    --dmg) DMG=1 ;;
     --install) INSTALL=1 ;;
     *) echo "알 수 없는 옵션: $arg" >&2; exit 1 ;;
   esac
@@ -69,6 +71,17 @@ if [[ $ZIP == 1 ]]; then
   # ditto는 .app 안의 서명·권한을 그대로 보존한다 (zip 명령은 깨뜨릴 수 있음)
   ditto -c -k --keepParent "dist/$APP" "$ZIPFILE"
   echo "만듦: $ZIPFILE"
+fi
+
+if [[ $DMG == 1 ]]; then
+  DMGFILE="dist/ggl-$VERSION-macos-$ARCH.dmg"
+  # 열면 ggl.app 과 '응용 프로그램' 바로가기가 나란히 보이는 디스크 이미지 (끌어다 놓아 설치)
+  STAGE="$(mktemp -d)"
+  ditto "dist/$APP" "$STAGE/$APP"
+  ln -s /Applications "$STAGE/Applications"
+  hdiutil create -volname "ggl $VERSION" -srcfolder "$STAGE" -format UDZO -ov -quiet "$DMGFILE"
+  rm -rf "$STAGE"
+  echo "만듦: $DMGFILE"
 fi
 
 if [[ $INSTALL == 1 ]]; then

@@ -24,12 +24,13 @@ jobs:
         run: cargo test
 
       - name: 빌드 (Apple Silicon + Intel)
-        run: ./bundle.sh --universal --zip
+        run: ./bundle.sh --universal --zip --dmg
 
+      # zip은 install.sh가 받아 쓰고, dmg는 브라우저로 직접 받는 사람용이다.
       - name: Releases에 올리기
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.dmg \
             --title "ggl $GITHUB_REF_NAME" \
             --notes-file .github/release-notes.md
