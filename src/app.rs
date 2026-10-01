@@ -660,6 +660,8 @@ impl eframe::App for App {
     /// 2048이면 약 16MB를 넘기 전에 비우고 다시 채운다. (커밋 1,900개를 훑어도 실제로는 8MB 정도)
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         raw.max_texture_side = Some(raw.max_texture_side.unwrap_or(2048).min(2048));
+        #[cfg(feature = "screenshot")]
+        crate::devshot::inject(raw);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

@@ -180,6 +180,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 continue;
             };
             let resp = ui.interact(rect, Id::new(("row", &commit.hash)), Sense::click());
+            #[cfg(feature = "screenshot")]
+            crate::devshot::row_rect(row, rect);
             let is_open = open_row == Some(row);
             let bg = if is_open {
                 Some(pal.selected)

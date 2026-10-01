@@ -3,9 +3,11 @@
 //! GGL_SHOT=out.png  [GGL_SELECT=행번호] [GGL_SEARCH=검색어] [GGL_THEME=light|dark] [GGL_WAIT=초] [GGL_DIFF=파일번호]
 //! [GGL_FETCH=1] 리모트 새로고침을 누른 뒤 찍는다
 //! [GGL_PUSH=1] 현재 브랜치 푸시를 눌러 확인 창을 띄운 채 찍는다 (실행하지 않음)
+//! [GGL_MENU=행번호] 그 행을 오른쪽 클릭해서 메뉴를 띄운 채 찍는다
 //! [GGL_SCROLL=행수] 처음부터 그 행까지 스크롤하며 글자를 그려본다 (오래 켜둘 때 메모리 확인용)
 //! 데이터(와 상세)가 다 불러와지면 화면을 저장하고 종료한다.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use eframe::egui;
@@ -13,6 +15,40 @@ use eframe::egui;
 use crate::app::App;
 
 static STAGE: AtomicU32 = AtomicU32::new(0);
+/// GGL_MENU 행의 화면 위치 (표가 그릴 때 알려준다)
+static MENU_ROW: Mutex<Option<egui::Pos2>> = Mutex::new(None);
+/// 다음 프레임에 넣을 가짜 입력
+static EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
+static MENU_OPENED: AtomicU32 = AtomicU32::new(0);
+
+/// 표가 행을 그릴 때 부른다. GGL_MENU 행이면 위치를 기억한다.
+pub fn row_rect(row: usize, rect: egui::Rect) {
+    if std::env::var("GGL_MENU").ok().and_then(|s| s.parse().ok()) == Some(row) {
+        *MENU_ROW.lock().unwrap() = Some(rect.left_center() + egui::vec2(rect.width() * 0.3, 0.0));
+    }
+}
+
+/// 쌓아둔 가짜 입력을 이번 프레임 입력에 넣는다.
+pub fn inject(raw: &mut egui::RawInput) {
+    raw.events.append(&mut EVENTS.lock().unwrap());
+}
+
+/// GGL_MENU가 있으면 그 행을 오른쪽 클릭한다. 메뉴가 열렸으면(또는 필요 없으면) true.
+fn menu_opened() -> bool {
+    if std::env::var("GGL_MENU").is_err() || MENU_OPENED.load(Ordering::Relaxed) > 0 {
+        return true;
+    }
+    let Some(pos) = *MENU_ROW.lock().unwrap() else { return false };
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Secondary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    EVENTS.lock().unwrap().extend([egui::Event::PointerMoved(pos), button(true), button(false)]);
+    MENU_OPENED.store(1, Ordering::Relaxed);
+    false
+}
 
 pub fn tick(app: &mut App, ui: &egui::Ui) {
     let Ok(path) = std::env::var("GGL_SHOT") else { return };
@@ -70,6 +106,7 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
             }
         }
         2 if !scrolled(app) => {}
+        2 if !menu_opened() => {}
         // 몇 프레임 더 그려서 레이아웃이 자리 잡게 한다.
         2..=5 => STAGE.store(stage + 1, Ordering::Relaxed),
         6 => {

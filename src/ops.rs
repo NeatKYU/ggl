@@ -134,6 +134,17 @@ pub fn checkouts(snap: &Snapshot, row: usize) -> Vec<Item> {
     labels(snap, &commit.hash).iter().filter_map(|l| checkout(snap, l)).collect()
 }
 
+/// 이 행에 있는 브랜치 이름 (로컬 먼저, 그다음 리모트). 이름 복사 메뉴에 쓴다.
+pub fn branch_names(snap: &Snapshot, row: usize) -> Vec<String> {
+    let Some(commit) = snap.commits.get(row) else { return Vec::new() };
+    let mut names: Vec<&RefLabel> = labels(snap, &commit.hash)
+        .iter()
+        .filter(|l| matches!(l.kind, RefKind::Branch | RefKind::Remote))
+        .collect();
+    names.sort_by_key(|l| l.kind != RefKind::Branch);
+    names.into_iter().map(|l| l.name.clone()).collect()
+}
+
 /// 로컬 브랜치를 푸시하는 메뉴 줄.
 /// 따라가는 리모트 브랜치가 있으면 그쪽으로, 없으면 리모트마다 올리면서 따라가게 설정하는 줄을 만든다.
 pub fn pushes(snap: &Snapshot, branch: &str) -> Vec<Item> {
@@ -411,6 +422,16 @@ mod tests {
         snap.remotes.clear();
         snap.upstreams.clear();
         assert!(menu(&snap, 1).concat().iter().all(|i| !matches!(i.op, Op::Push { .. })));
+    }
+
+    #[test]
+    fn branch_names_for_copy() {
+        let snap = snapshot();
+        // 로컬 먼저, 그다음 리모트. 태그는 빠진다.
+        assert_eq!(branch_names(&snap, 0), vec!["feature", "origin/topic", "origin/dev"]);
+        assert_eq!(branch_names(&snap, 1), vec!["main", "other"]);
+        assert!(branch_names(&snap, 2).is_empty());
+        assert!(branch_names(&snap, 9).is_empty());
     }
 
     /// 실제 git 저장소를 임시 폴더에 만들어 작업을 돌려본다.

@@ -12,8 +12,10 @@ pub fn row_menu(ui: &mut egui::Ui, snap: &Snapshot, row: usize, busy: bool) -> O
     let mut chosen = None;
     let groups = ops::menu(snap, row);
     let hash = snap.commits.get(row).map(|c| &c.hash).filter(|h| *h != UNCOMMITTED);
+    let names = ops::branch_names(snap, row);
     let has_ops = !groups.is_empty();
-    if !has_ops && hash.is_none() {
+    let has_copy = !names.is_empty() || hash.is_some();
+    if !has_ops && !has_copy {
         ui.label(RichText::new("할 수 있는 작업이 없어요").weak());
     }
     for (i, group) in groups.into_iter().enumerate() {
@@ -27,10 +29,16 @@ pub fn row_menu(ui: &mut egui::Ui, snap: &Snapshot, row: usize, busy: bool) -> O
             }
         }
     }
-    if let Some(hash) = hash {
-        if has_ops {
-            ui.separator();
+    // 복사: 이 커밋에 있는 브랜치 이름들, 그리고 커밋 해시
+    if has_ops && has_copy {
+        ui.separator();
+    }
+    for name in names {
+        if ui.button(format!("브랜치 이름 복사: {name}")).clicked() {
+            ui.ctx().copy_text(name);
         }
+    }
+    if let Some(hash) = hash {
         if ui.button("해시 복사").clicked() {
             ui.ctx().copy_text(hash.clone());
         }
