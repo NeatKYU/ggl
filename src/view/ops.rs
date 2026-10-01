@@ -116,6 +116,10 @@ pub fn confirm(app: &mut App, ctx: &egui::Context) {
 fn warning(op: &Op) -> Option<&'static str> {
     match op {
         Op::Pull => Some("리모트의 새 커밋을 받아서 현재 브랜치에 합쳐요."),
+        Op::Push { set_upstream: true, .. } => {
+            Some("리모트에 올리고, 앞으로 이 브랜치가 그 리모트 브랜치를 따라가게 설정해요. 리모트에 없으면 새로 만들어요.")
+        }
+        Op::Push { .. } => Some("로컬 커밋을 리모트에 올려요. 리모트에 내가 받지 않은 커밋이 있으면 덮어쓰지 않고 거절돼요."),
         Op::Merge(_) => Some("충돌이 없으면 현재 브랜치에 바로 합쳐져요."),
         Op::CherryPick(_) => Some("이 커밋의 변경만 현재 브랜치에 새 커밋으로 복사해요."),
         Op::Abort(_) => Some("충돌을 해결하던 내용은 사라지고, 시작하기 전 상태로 돌아가요."),

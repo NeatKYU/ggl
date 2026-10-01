@@ -1,10 +1,11 @@
-//! 위쪽 도구 모음: 저장소 선택, 브랜치 필터, 리모트 표시, 검색, 새로고침, 리모트 새로고침
+//! 위쪽 도구 모음: 저장소 선택, 브랜치 필터, 리모트 표시, 검색, 새로고침, 리모트 새로고침, 푸시
 
 use std::path::PathBuf;
 
 use eframe::egui::{self, Align, Key, Layout, RichText};
 
 use crate::app::{App, FetchState, repo_name};
+use crate::ops;
 use crate::style::Palette;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -22,6 +23,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.reload();
             }
             fetch_button(app, ui);
+            push_button(app, ui);
 
             let working = app.running.as_ref().map(|op| op.progress());
             match app.fetch_state.clone() {
@@ -52,6 +54,62 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             search_box(app, ui, &pal);
         });
     });
+}
+
+/// 현재 브랜치 푸시 버튼. 아직 올리지 않은 커밋 수를 함께 보여준다.
+/// 따라가는 리모트 브랜치가 없고 리모트가 여러 개면 어디로 올릴지 고르는 메뉴가 된다.
+fn push_button(app: &mut App, ui: &mut egui::Ui) {
+    let (items, ahead, branch) = match &app.data {
+        Some(d) => {
+            let items = d.snap.head_branch.as_deref().map_or_else(Vec::new, |b| ops::pushes(&d.snap, b));
+            (items, d.snap.ahead, d.snap.head_branch.clone())
+        }
+        None => (Vec::new(), None, None),
+    };
+    let label = match ahead {
+        Some(n) if n > 0 => format!("푸시 ↑{n}"),
+        _ => "푸시".to_string(),
+    };
+    let disabled_hint = if branch.is_none() {
+        "브랜치에 있을 때만 푸시할 수 있어요 (지금은 특정 커밋을 보고 있어요)"
+    } else if items.is_empty() {
+        "이 저장소에는 리모트가 없어요"
+    } else {
+        "다른 작업이 끝난 뒤에 할 수 있어요"
+    };
+    let enabled = !items.is_empty() && !app.busy();
+
+    if items.len() > 1 {
+        let mut chosen = None;
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.menu_button(label, |ui| {
+                for item in &items {
+                    if ui.button(&item.text).clicked() {
+                        chosen = Some(item.clone());
+                    }
+                }
+            })
+            .response
+            .on_disabled_hover_text(disabled_hint);
+        });
+        if let Some(item) = chosen {
+            app.request(item);
+        }
+        return;
+    }
+
+    let hint = match (items.first(), ahead) {
+        (Some(item), Some(0)) => format!("{}\n올릴 커밋이 없어요 ({})", item.text, item.op.command()),
+        (Some(item), Some(n)) => format!("{}\n커밋 {n}개를 올려요 ({})", item.text, item.op.command()),
+        (Some(item), None) => format!("{}\n({})", item.text, item.op.command()),
+        (None, _) => String::new(),
+    };
+    let r = ui.add_enabled(enabled, egui::Button::new(label));
+    if r.on_hover_text(hint).on_disabled_hover_text(disabled_hint).clicked() {
+        if let Some(item) = items.into_iter().next() {
+            app.request(item);
+        }
+    }
 }
 
 /// 리모트 새로고침 (git fetch) 버튼

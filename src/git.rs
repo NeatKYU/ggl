@@ -75,6 +75,14 @@ pub struct Snapshot {
     pub head_branch: Option<String>,
     /// 현재 브랜치가 따라가는 리모트 브랜치 (예: origin/main). 없으면 풀을 할 수 없다.
     pub upstream: Option<String>,
+    /// 현재 브랜치에서 아직 upstream에 올리지 않은 커밋 수
+    pub ahead: Option<usize>,
+    /// 로컬 브랜치 → 따라가는 브랜치 (예: main → origin/main). 따라가는 게 없는 브랜치는 빠진다.
+    pub upstreams: HashMap<String, String>,
+    /// 리모트 이름들 (예: origin)
+    pub remotes: Vec<String>,
+    /// 리모트에 있는 브랜치 전부 (예: origin/main). 리모트 브랜치를 화면에서 숨겨도 채워진다.
+    pub remote_refs: Vec<String>,
     pub in_progress: Option<InProgress>,
     pub more: bool,
     /// 브랜치 필터 목록 (로컬 먼저, 그다음 리모트)
@@ -222,7 +230,8 @@ pub fn load(req: &LoadRequest) -> Result<Snapshot, String> {
         ..Default::default()
     };
 
-    snap.has_remotes = git(repo, &["remote"]).is_ok_and(|s| !s.trim().is_empty());
+    snap.remotes = git(repo, &["remote"]).unwrap_or_default().lines().map(str::to_string).collect();
+    snap.has_remotes = !snap.remotes.is_empty();
     snap.in_progress = in_progress(repo);
     if snap.head_branch.is_some() {
         snap.upstream = git(repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
@@ -230,6 +239,18 @@ pub fn load(req: &LoadRequest) -> Result<Snapshot, String> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
     }
+    if snap.upstream.is_some() {
+        snap.ahead = git(repo, &["rev-list", "--count", "@{upstream}..HEAD"]).ok().and_then(|s| s.trim().parse().ok());
+    }
+    // 브랜치 이름에는 공백이 들어갈 수 없어서 공백으로 나눠도 안전하다.
+    let tracking = git(repo, &["for-each-ref", "--format=%(refname:short) %(upstream:short)", "refs/heads"]);
+    snap.upstreams = tracking
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, up)| !up.is_empty())
+        .map(|(b, up)| (b.to_string(), up.to_string()))
+        .collect();
 
     // 브랜치·태그 위치. 커밋이 하나도 없는 저장소에서는 실패하므로 빈 결과로 둔다.
     let show_ref = git(repo, &["show-ref", "-d", "--head"]).unwrap_or_default();
@@ -243,8 +264,11 @@ pub fn load(req: &LoadRequest) -> Result<Snapshot, String> {
         } else if let Some(n) = name.strip_prefix("refs/heads/") {
             heads.push((n.to_string(), hash.to_string()));
         } else if let Some(n) = name.strip_prefix("refs/remotes/") {
-            if req.show_remotes && !n.ends_with("/HEAD") {
-                remotes.push((n.to_string(), hash.to_string()));
+            if !n.ends_with("/HEAD") {
+                snap.remote_refs.push(n.to_string());
+                if req.show_remotes {
+                    remotes.push((n.to_string(), hash.to_string()));
+                }
             }
         } else if let Some(n) = name.strip_prefix("refs/tags/") {
             // 주석 태그는 "v1^{}" 줄이 실제 커밋을 가리킨다.

@@ -2,6 +2,7 @@
 //!
 //! GGL_SHOT=out.png  [GGL_SELECT=행번호] [GGL_SEARCH=검색어] [GGL_THEME=light|dark] [GGL_WAIT=초] [GGL_DIFF=파일번호]
 //! [GGL_FETCH=1] 리모트 새로고침을 누른 뒤 찍는다
+//! [GGL_PUSH=1] 현재 브랜치 푸시를 눌러 확인 창을 띄운 채 찍는다 (실행하지 않음)
 //! [GGL_SCROLL=행수] 처음부터 그 행까지 스크롤하며 글자를 그려본다 (오래 켜둘 때 메모리 확인용)
 //! 데이터(와 상세)가 다 불러와지면 화면을 저장하고 종료한다.
 
@@ -47,6 +48,13 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
             }
             if std::env::var("GGL_FETCH").is_ok() {
                 app.fetch();
+            }
+            if std::env::var("GGL_PUSH").is_ok() {
+                let snap = &app.data.as_ref().unwrap().snap;
+                let item = snap.head_branch.as_deref().and_then(|b| crate::ops::pushes(snap, b).into_iter().next());
+                if let Some(item) = item {
+                    app.request(item);
+                }
             }
             if let Some(row) = std::env::var("GGL_SELECT").ok().and_then(|s| s.parse().ok()) {
                 app.select_row(row);
