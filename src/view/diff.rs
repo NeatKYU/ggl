@@ -5,7 +5,7 @@ use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Margin, Rect, R
 
 use crate::app::App;
 use crate::git::{Diff, LineKind};
-use crate::style::{self, LABEL, Palette, SMALL, TEXT};
+use crate::style::{self, LABEL, Palette, SMALL, TEXT, icon, icon_button};
 use crate::view::details::status_style;
 
 const LINE_H: f32 = 18.0;
@@ -26,13 +26,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // 버튼을 오른쪽부터 먼저 놓고, 남은 폭에 파일 이름을 말줄임으로 넣는다.
         // (한 줄 높이로 감싸지 않으면 오른쪽 정렬 레이아웃이 패널 높이를 다 차지한다)
         ui.horizontal(|ui| ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("닫기").on_hover_text("Esc").clicked() {
+            if ui.add(icon_button(icon::CLOSE)).on_hover_text("닫기 (Esc)").clicked() {
                 close = true;
             }
-            if ui.add_enabled(index + 1 < count, egui::Button::new("다음 ▸")).clicked() {
+            let next = ui.add_enabled(index + 1 < count, icon_button(icon::NEXT));
+            if next.on_hover_text("다음 파일").clicked() {
                 go = Some(index + 1);
             }
-            if ui.add_enabled(index > 0, egui::Button::new("◂ 이전")).clicked() {
+            let prev = ui.add_enabled(index > 0, icon_button(icon::PREV));
+            if prev.on_hover_text("이전 파일").clicked() {
                 go = index.checked_sub(1);
             }
             ui.label(RichText::new(format!("{}/{}", index + 1, count)).small().color(pal.weak));

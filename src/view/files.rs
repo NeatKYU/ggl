@@ -14,7 +14,7 @@ use eframe::egui::{
 use crate::app::{App, FileView, Leave, Side};
 use crate::edit::Editor;
 use crate::git::LineKind;
-use crate::style::{self, LABEL, Palette, SMALL, TEXT};
+use crate::style::{self, LABEL, Palette, SMALL, TEXT, icon, icon_button, icon_toggle};
 use crate::tree::FileTree;
 use crate::view::details::status_style;
 use crate::view::table::truncated;
@@ -43,11 +43,11 @@ pub fn side(app: &mut App, ui: &mut egui::Ui) {
     ui.set_min_size(ui.available_size());
     egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 8, bottom: 0 }).show(ui, |ui| {
         ui.horizontal(|ui| {
-            let files = ui.selectable_label(app.side == Side::Files, "파일");
+            let files = ui.add(icon_toggle(app.side == Side::Files, icon::TREE));
             if files.on_hover_text("파일 트리 (⌘B로 패널 보기/숨기기)").clicked() {
                 app.side = Side::Files;
             }
-            let find = ui.selectable_label(app.side == Side::Search, "검색");
+            let find = ui.add(icon_toggle(app.side == Side::Search, icon::SEARCH));
             if find.on_hover_text("파일 내용 검색 (⌘⇧F)").clicked() {
                 app.open_find();
             }
@@ -72,8 +72,8 @@ fn tree(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(RichText::new(count).small().color(pal.weak));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let fold = ui.add_enabled(!app.tree_open.is_empty(), egui::Button::new(RichText::new("모두 접기").small()));
-                if fold.clicked() {
+                let fold = ui.add_enabled(!app.tree_open.is_empty(), icon_button(icon::COLLAPSE));
+                if fold.on_hover_text("모두 접기").clicked() {
                     app.tree_open.clear();
                 }
             });
@@ -298,11 +298,11 @@ fn header(ui: &mut egui::Ui, view: &FileView, editor: Option<&Editor>, pal: &Pal
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             match editor {
                 Some(ed) => {
-                    if ui.button("완료").on_hover_text("편집을 끝내고 보기로 돌아가기 (Esc)").clicked() {
+                    if ui.add(icon_button(icon::DONE)).on_hover_text("편집 끝내기 (Esc)").clicked() {
                         action = Some(FileAction::StopEditing);
                     }
-                    let save = ui.add_enabled(ed.dirty(), egui::Button::new("저장"));
-                    if save.on_hover_text("⌘S").clicked() {
+                    let save = ui.add_enabled(ed.dirty(), icon_button(icon::SAVE));
+                    if save.on_hover_text("저장 (⌘S)").clicked() {
                         action = Some(FileAction::Save);
                     }
                     let (text, color) = match &ed.error {
@@ -313,12 +313,12 @@ fn header(ui: &mut egui::Ui, view: &FileView, editor: Option<&Editor>, pal: &Pal
                     ui.label(RichText::new(text).small().color(color));
                 }
                 None => {
-                    if ui.button("닫기").on_hover_text("Esc").clicked() {
+                    if ui.add(icon_button(icon::CLOSE)).on_hover_text("닫기 (Esc)").clicked() {
                         action = Some(FileAction::Close);
                     }
                     let blocked = edit_blocked(view);
-                    let edit = ui.add_enabled(blocked.is_none(), egui::Button::new("편집"));
-                    if edit.on_disabled_hover_text(blocked.unwrap_or_default()).clicked() {
+                    let edit = ui.add_enabled(blocked.is_none(), icon_button(icon::EDIT));
+                    if edit.on_hover_text("편집").on_disabled_hover_text(blocked.unwrap_or_default()).clicked() {
                         action = Some(FileAction::Edit);
                     }
                     if let Some(Ok(d)) = &view.result {

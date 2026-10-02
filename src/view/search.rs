@@ -13,7 +13,7 @@ use eframe::epaint::text::{LayoutJob, TextFormat, TextWrapping};
 
 use crate::app::App;
 use crate::git::{Grep, MAX_GREP_LINES};
-use crate::style::{self, LABEL, Palette, SMALL, TEXT};
+use crate::style::{self, LABEL, Palette, SMALL, TEXT, icon, icon_toggle};
 use crate::view::table::truncated;
 
 const ROW_H: f32 = 22.0;
@@ -34,7 +34,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::Frame::new().inner_margin(Margin { left: 10, right: 8, top: 4, bottom: 6 }).show(ui, |ui| {
         // 한 줄 높이로 감싸지 않으면 오른쪽 정렬 레이아웃이 패널 높이를 다 차지한다.
         ui.horizontal(|ui| ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let case = ui.selectable_label(app.find.case, RichText::new("Aa").monospace());
+            let case = ui.add(icon_toggle(app.find.case, icon::CASE));
             if case.on_hover_text("대소문자 구분").clicked() {
                 app.find.case = !app.find.case;
                 app.run_find();

@@ -40,6 +40,41 @@ pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(BOLD.into()))
 }
 
+/// 버튼 아이콘 ([Phosphor](https://phosphoricons.com), MIT).
+/// `assets/icons.ttf`는 아래 글자만 남긴 부분 폰트(약 5KB)라서, 아이콘을 늘리면 폰트도 다시 만들어야 한다:
+/// `pyftsubset Phosphor.ttf --unicodes=<아래 코드 전부> --layout-features='' --output-file=assets/icons.ttf`
+pub mod icon {
+    pub const SIDEBAR: &str = "\u{ec24}";
+    pub const FOLDER: &str = "\u{e25a}";
+    pub const BRANCH: &str = "\u{e278}";
+    pub const CLOUD: &str = "\u{e1aa}";
+    pub const REFRESH: &str = "\u{e036}";
+    pub const FETCH: &str = "\u{e1ac}";
+    pub const PUSH: &str = "\u{e1ae}";
+    pub const SEARCH: &str = "\u{e30c}";
+    pub const TREE: &str = "\u{ee48}";
+    pub const COLLAPSE: &str = "\u{e532}";
+    pub const EDIT: &str = "\u{e3b4}";
+    pub const SAVE: &str = "\u{e248}";
+    pub const DONE: &str = "\u{e182}";
+    pub const CLOSE: &str = "\u{e4f6}";
+    pub const PREV: &str = "\u{e138}";
+    pub const NEXT: &str = "\u{e13a}";
+    pub const CASE: &str = "\u{e6ee}";
+}
+
+pub const ICON: f32 = 15.0;
+
+/// 아이콘만 있는 버튼. 크기를 맞춰서 나란히 놓아도 가지런하다. 설명은 `on_hover_text`로 붙인다.
+pub fn icon_button(icon: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(icon).size(ICON)).min_size(egui::vec2(26.0, 24.0))
+}
+
+/// 켜고 끄는 아이콘 버튼
+pub fn icon_toggle(selected: bool, icon: &str) -> egui::Button<'static> {
+    egui::Button::selectable(selected, egui::RichText::new(icon).size(ICON)).min_size(egui::vec2(26.0, 24.0))
+}
+
 /// 화면 곳곳에서 쓰는 색. 다크/라이트 모드에 따라 달라진다.
 pub struct Palette {
     pub bg: Color32,
@@ -154,9 +189,13 @@ fn install_fonts(ctx: &egui::Context) {
 
     let defaults = fonts.families[&FontFamily::Proportional].clone();
     let mono_defaults = fonts.families[&FontFamily::Monospace].clone();
+    // 아이콘은 앱에 넣어둔 작은 폰트. 사용자 영역(PUA) 글자라서 어느 글꼴 뒤에 붙여도 겹치지 않는다.
+    let icons = FontData::from_static(include_bytes!("../assets/icons.ttf"));
+    fonts.font_data.insert("icons".to_string(), Arc::new(icons));
     let pick = |list: &[(&str, bool)], rest: &[String]| -> Vec<String> {
         let mut v: Vec<String> = list.iter().filter(|(_, ok)| *ok).map(|(n, _)| n.to_string()).collect();
         v.extend(rest.iter().cloned());
+        v.push("icons".to_string());
         v
     };
     fonts.families.insert(FontFamily::Proportional, pick(&[("sf", sf), ("kr", kr)], &defaults));

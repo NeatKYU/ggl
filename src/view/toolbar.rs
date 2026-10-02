@@ -6,28 +6,35 @@ use eframe::egui::{self, Align, Key, Layout, RichText};
 
 use crate::app::{App, FetchState, repo_name};
 use crate::ops;
-use crate::style::Palette;
+use crate::style::{Palette, icon, icon_button, icon_toggle, ICON};
 
+/// 왼쪽: [패널] | [저장소 ▾] [브랜치 ▾] [리모트]      오른쪽: 상태 · [검색] | [가져오기] [푸시] [새로고침]
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let pal = Palette::of(ui);
     ui.horizontal(|ui| {
-        let files = ui.selectable_label(app.settings.show_files, "파일");
+        let files = ui.add(icon_toggle(app.settings.show_files, icon::SIDEBAR));
         if files.on_hover_text("파일 트리 보기/숨기기 (⌘B)").clicked() {
             app.toggle_files();
         }
+        ui.separator();
         repo_picker(app, ui, &pal);
         branch_picker(app, ui);
-        if ui.checkbox(&mut app.settings.show_remotes, "리모트 브랜치").changed() {
+        let remotes = ui.add(icon_toggle(app.settings.show_remotes, icon::CLOUD));
+        if remotes.on_hover_text("리모트 브랜치 보기/숨기기").clicked() {
+            app.settings.show_remotes = !app.settings.show_remotes;
             app.toggle_remotes();
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let busy = app.loading && app.data.is_some();
-            if ui.button("새로고침").on_hover_text("다시 불러오기 (⌘R)").clicked() {
+            if ui.add(icon_button(icon::REFRESH)).on_hover_text("새로고침 (⌘R)").clicked() {
                 app.refresh();
             }
-            fetch_button(app, ui);
             push_button(app, ui);
+            fetch_button(app, ui);
+            ui.separator();
+            search_box(app, ui, &pal);
+            ui.add_space(4.0);
 
             let working = app.running.as_ref().map(|op| op.progress());
             match app.fetch_state.clone() {
@@ -54,8 +61,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         .on_hover_text("파일이 바뀌면 자동으로 새로고침돼요");
                 }
             }
-            ui.add_space(8.0);
-            search_box(app, ui, &pal);
         });
     });
 }
@@ -71,8 +76,8 @@ fn push_button(app: &mut App, ui: &mut egui::Ui) {
         None => (Vec::new(), None, None),
     };
     let label = match ahead {
-        Some(n) if n > 0 => format!("푸시 ↑{n}"),
-        _ => "푸시".to_string(),
+        Some(n) if n > 0 => format!("{} {n}", icon::PUSH),
+        _ => icon::PUSH.to_string(),
     };
     let disabled_hint = if branch.is_none() {
         "브랜치에 있을 때만 푸시할 수 있어요 (지금은 특정 커밋을 보고 있어요)"
@@ -86,7 +91,8 @@ fn push_button(app: &mut App, ui: &mut egui::Ui) {
     if items.len() > 1 {
         let mut chosen = None;
         ui.add_enabled_ui(enabled, |ui| {
-            ui.menu_button(label, |ui| {
+            ui.menu_button(RichText::new(label).size(ICON), |ui| {
+                ui.label(RichText::new("어디로 푸시할까요?").small());
                 for item in &items {
                     if ui.button(&item.text).clicked() {
                         chosen = Some(item.clone());
@@ -94,6 +100,7 @@ fn push_button(app: &mut App, ui: &mut egui::Ui) {
                 }
             })
             .response
+            .on_hover_text("푸시")
             .on_disabled_hover_text(disabled_hint);
         });
         if let Some(item) = chosen {
@@ -108,7 +115,7 @@ fn push_button(app: &mut App, ui: &mut egui::Ui) {
         (Some(item), None) => format!("{}\n({})", item.text, item.op.command()),
         (None, _) => String::new(),
     };
-    let r = ui.add_enabled(enabled, egui::Button::new(label));
+    let r = ui.add_enabled(enabled, icon_button(label));
     if r.on_hover_text(hint).on_disabled_hover_text(disabled_hint).clicked() {
         if let Some(item) = items.into_iter().next() {
             app.request(item);
@@ -120,7 +127,7 @@ fn push_button(app: &mut App, ui: &mut egui::Ui) {
 fn fetch_button(app: &mut App, ui: &mut egui::Ui) {
     let has_remotes = app.data.as_ref().is_some_and(|d| d.snap.has_remotes);
     let running = app.fetch_state == FetchState::Running;
-    let r = ui.add_enabled(has_remotes && !app.busy(), egui::Button::new("리모트 새로고침"));
+    let r = ui.add_enabled(has_remotes && !app.busy(), icon_button(icon::FETCH));
     let hint = if !has_remotes {
         "이 저장소에는 리모트가 없어요".to_string()
     } else {
@@ -129,7 +136,7 @@ fn fetch_button(app: &mut App, ui: &mut egui::Ui) {
         } else {
             format!("\n마지막으로 가져온 시각: {}", app.fetched_at)
         };
-        format!("리모트의 새 커밋과 브랜치를 가져와요 (git fetch, ⌘⇧R)\n내 브랜치와 작업 파일은 바뀌지 않아요{last}")
+        format!("리모트 새로고침 (⌘⇧R)\n리모트의 새 커밋과 브랜치를 가져와요 (git fetch)\n내 브랜치와 작업 파일은 바뀌지 않아요{last}")
     };
     let disabled_hint = if running {
         "리모트를 가져오는 중이에요"
@@ -149,7 +156,7 @@ fn repo_picker(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
     let mut forget: Option<PathBuf> = None;
     let mut pick = false;
     egui::ComboBox::from_id_salt("repo")
-        .selected_text(RichText::new(current).strong())
+        .selected_text(RichText::new(format!("{}  {current}", icon::FOLDER)).strong())
         .width(180.0)
         .height(400.0)
         .show_ui(ui, |ui| {
@@ -195,7 +202,7 @@ fn branch_picker(app: &mut App, ui: &mut egui::Ui) {
     let mut chosen = app.branch.clone();
     let label = chosen.as_deref().map_or("모든 브랜치", |b| b.strip_prefix("remotes/").unwrap_or(b));
     egui::ComboBox::from_id_salt("branch")
-        .selected_text(label.to_string())
+        .selected_text(format!("{}  {label}", icon::BRANCH))
         .width(160.0)
         .height(420.0)
         .show_ui(ui, |ui| {
@@ -221,8 +228,10 @@ fn search_box(app: &mut App, ui: &mut egui::Ui, pal: &Palette) {
         ui.label(RichText::new(text).small().color(pal.weak));
     }
     let edit = egui::TextEdit::singleline(&mut app.search)
-        .hint_text("검색  ⌘F")
-        .desired_width(200.0);
+        .hint_text(format!("{}  커밋 검색  ⌘F", icon::SEARCH))
+        .desired_width(200.0)
+        .min_size(egui::vec2(0.0, 24.0))
+        .vertical_align(Align::Center);
     let r = ui.add(edit);
     if app.focus_search {
         r.request_focus();
