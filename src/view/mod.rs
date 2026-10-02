@@ -1,6 +1,8 @@
 pub mod details;
 pub mod diff;
+pub mod edit;
 pub mod files;
 pub mod ops;
+pub mod search;
 pub mod table;
 pub mod toolbar;

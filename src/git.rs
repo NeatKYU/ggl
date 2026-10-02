@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -718,6 +718,107 @@ fn read_text(full: &Path, diff: &mut Diff) -> Result<Option<String>, String> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+/// 내용 검색에서 맞은 줄
+#[derive(Clone, Debug)]
+pub struct GrepLine {
+    pub line: u32,
+    /// 화면에 보여줄 부분 (앞 공백을 빼고, 긴 줄은 맞은 곳 근처만)
+    pub text: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GrepFile {
+    pub path: String,
+    pub lines: Vec<GrepLine>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Grep {
+    pub files: Vec<GrepFile>,
+    pub lines: usize,
+    /// 너무 많아서 중간에 멈췄으면 true
+    pub truncated: bool,
+}
+
+pub const MAX_GREP_LINES: usize = 2000;
+
+/// 저장소 파일 내용에서 `query`를 글자 그대로 찾는다.
+/// 아직 추가 안 한 새 파일도 찾고, `.gitignore`에 걸린 파일과 바이너리 파일은 건너뛴다.
+/// 결과가 많으면 `MAX_GREP_LINES`줄에서 멈춘다 (git도 그때 끝낸다).
+pub fn grep(repo: &Path, query: &str, case_sensitive: bool) -> Result<Grep, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["--no-optional-locks", "-c", "core.quotepath=false", "-C"])
+        .arg(repo)
+        .args(["grep", "-n", "-z", "--column", "-I", "--fixed-strings", "--untracked", "--exclude-standard"])
+        .args(["--no-color", "--full-name"]);
+    if !case_sensitive {
+        cmd.arg("-i");
+    }
+    let mut child = cmd
+        .args(["-e", query])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git을 실행할 수 없어요: {e}"))?;
+    let err = drain(child.stderr.take());
+
+    let mut result = Grep::default();
+    let stdout = child.stdout.take().ok_or("git 출력을 읽을 수 없어요")?;
+    for record in std::io::BufReader::new(stdout).split(b'\n') {
+        let Ok(record) = record else { break };
+        if result.lines >= MAX_GREP_LINES {
+            result.truncated = true;
+            break;
+        }
+        let record = String::from_utf8_lossy(&record);
+        let Some((path, line, col, text)) = parse_grep_record(&record) else { continue };
+        let hit = GrepLine { line, text: snippet(text, col) };
+        match result.files.last_mut().filter(|f| f.path == path) {
+            Some(f) => f.lines.push(hit),
+            None => result.files.push(GrepFile { path: path.to_string(), lines: vec![hit] }),
+        }
+        result.lines += 1;
+    }
+    if result.truncated {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    // 1은 "맞는 줄 없음"이다.
+    if !result.truncated && !status.success() && status.code() != Some(1) {
+        let msg = err.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+        return Err(if msg.trim().is_empty() { "검색하지 못했어요".into() } else { msg.trim().to_string() });
+    }
+    Ok(result)
+}
+
+/// `경로\0줄\0칸\0내용`
+fn parse_grep_record(record: &str) -> Option<(&str, u32, usize, &str)> {
+    let mut f = record.splitn(4, '\0');
+    let path = f.next()?;
+    let line = f.next()?.parse().ok()?;
+    let col = f.next()?.parse().ok()?;
+    Some((path, line, col, f.next()?))
+}
+
+/// 검색 결과에 보여줄 한 줄: 앞 공백을 빼고, 맞은 곳(`col`, 1부터 센 바이트 위치)이 멀리 있으면 그 근처부터.
+fn snippet(text: &str, col: usize) -> String {
+    let text = text.trim_end_matches('\r');
+    let floor = |mut i: usize| {
+        while !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let lead = text.len() - text.trim_start().len();
+    let hit = col.saturating_sub(1).min(text.len());
+    let (start, prefix) = if hit > lead + 60 { (floor(hit - 30), "…") } else { (lead, "") };
+    let end = floor((start + 400).min(text.len()));
+    let suffix = if end < text.len() { "…" } else { "" };
+    format!("{prefix}{}{suffix}", text[start..end].replace('\t', "    "))
+}
+
 /// 파일 트리에 보여줄 파일 하나
 #[derive(Clone, Debug)]
 pub struct TreeFile {
@@ -890,6 +991,40 @@ mod tests {
         assert_eq!(stats["a.txt"], (Some(3), Some(1)));
         assert_eq!(stats["new.rs"], (Some(0), Some(0)));
         assert_eq!(stats["img.png"], (None, None));
+    }
+
+    #[test]
+    fn parses_grep_records() {
+        let (path, line, col, text) = parse_grep_record("src/한글.rs\012\05\0    let x = find(); // a\0b").unwrap();
+        assert_eq!((path, line, col, text), ("src/한글.rs", 12, 5, "    let x = find(); // a\0b"));
+        assert!(parse_grep_record("broken").is_none());
+
+        assert_eq!(snippet("\t\tlet x = 1;\r", 3), "let x = 1;");
+        // 맞은 곳이 멀리 있으면 그 근처부터 보여준다 (한글 중간에서 자르지 않는다).
+        let long = format!("{}needle 끝", "가".repeat(40));
+        let s = snippet(&long, 121);
+        assert!(s.starts_with('…') && s.contains("needle 끝"), "{s}");
+    }
+
+    #[test]
+    fn greps_tracked_and_new_files() {
+        let dir = std::env::temp_dir().join(format!("ggl-grep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        sh(&["init", "-q"]);
+        std::fs::write(dir.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "Needle one\nnothing\nneedle two\n").unwrap();
+        std::fs::write(dir.join("ignored.txt"), "needle\n").unwrap();
+        sh(&["add", "a.txt", ".gitignore"]);
+        std::fs::write(dir.join("new.txt"), "a needle\n").unwrap();
+
+        let g = grep(&dir, "needle", false).unwrap();
+        let found: Vec<(&str, Vec<u32>)> =
+            g.files.iter().map(|f| (f.path.as_str(), f.lines.iter().map(|l| l.line).collect())).collect();
+        assert_eq!(found, [("a.txt", vec![1, 3]), ("new.txt", vec![1])]);
+        assert_eq!(grep(&dir, "needle", true).unwrap().lines, 2);
+        assert_eq!(grep(&dir, "없는 말", false).unwrap().lines, 0);
     }
 
     #[test]

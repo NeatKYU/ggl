@@ -6,11 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Duration;
 
 use eframe::egui::{self, Frame, Key, Margin, Modifiers};
 use serde::{Deserialize, Serialize};
 
-use crate::git::{self, Details, Diff, FileChange, LoadRequest, RefLabel, Snapshot};
+use crate::edit::Editor;
+use crate::git::{self, Details, Diff, FileChange, Grep, LoadRequest, RefLabel, Snapshot};
 use crate::graph::{self, Layout, OFFSCREEN};
 use crate::ops::{self, Item, Op};
 use crate::remote::{self, Request};
@@ -55,6 +57,44 @@ pub struct FileView {
     pub path: String,
     pub status: Option<char>,
     pub result: Option<Result<Diff, String>>,
+    /// 내용이 오면 이 줄로 스크롤한다 (한 번만)
+    pub goto: Option<u32>,
+    /// 검색 결과에서 연 줄 (계속 칠해 둔다)
+    pub mark: Option<u32>,
+}
+
+/// 왼쪽 패널에 보이는 것
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Files,
+    Search,
+}
+
+/// 파일 내용 검색 (⌘⇧F)
+#[derive(Default)]
+pub struct Find {
+    pub query: String,
+    /// 대소문자 구분
+    pub case: bool,
+    pub focus: bool,
+    /// 지금 보여주는(또는 기다리는) 결과의 검색어와 대소문자 구분
+    pub ran: Option<(String, bool)>,
+    pub result: Option<Result<Grep, String>>,
+    pub running: bool,
+    /// 입력이 멈추면 검색할 시각
+    due: Option<f64>,
+    /// 이름이 맞는 파일 (트리 노드 번호)
+    pub names: Vec<usize>,
+}
+
+/// 편집 중인 파일을 떠나는 동작. 저장 안 한 변경이 있으면 먼저 묻는다.
+pub enum Leave {
+    StopEditing,
+    CloseFile,
+    OpenFile(String, Option<char>, Option<u32>),
+    OpenDiff(usize),
+    OpenRepo(PathBuf),
+    Quit,
 }
 
 /// 불러온 저장소 데이터와 그래프 배치
@@ -118,6 +158,7 @@ enum Reply {
     Diff(PathBuf, String, String, Result<Diff, String>),
     Tree(PathBuf, Result<FileTree, String>),
     File(PathBuf, String, Result<Diff, String>),
+    Grep(PathBuf, (String, bool), Result<Grep, String>),
 }
 
 /// 스크롤 요청: 가운데로 보낼지, 화면 밖일 때만 살짝 움직일지
@@ -159,6 +200,12 @@ pub struct App {
     /// 트리 검색어에 맞는 파일 (트리 노드 번호)
     pub tree_matches: Vec<usize>,
     pub file_view: Option<FileView>,
+    pub side: Side,
+    pub find: Find,
+    /// 아래쪽에서 편집 중인 파일 (`file_view`와 같은 파일)
+    pub editor: Option<Editor>,
+    /// 저장 안 한 편집이 있어서 확인 창으로 물어보는 중인 이동
+    pub leaving: Option<Leave>,
 
     pub search: String,
     pub matches: Vec<usize>,
@@ -214,6 +261,10 @@ impl App {
             tree_filter: String::new(),
             tree_matches: Vec::new(),
             file_view: None,
+            side: Side::Files,
+            find: Find::default(),
+            editor: None,
+            leaving: None,
             search: String::new(),
             matches: Vec::new(),
             match_pos: 0,
@@ -239,6 +290,10 @@ impl App {
     }
 
     pub fn open_repo(&mut self, dir: &Path) {
+        self.leave(Leave::OpenRepo(dir.to_path_buf()));
+    }
+
+    fn load_repo(&mut self, dir: &Path) {
         let repo = match git::toplevel(dir) {
             Ok(r) => r,
             Err(e) => {
@@ -270,6 +325,7 @@ impl App {
         self.tree_filter.clear();
         self.tree_matches.clear();
         self.file_view = None;
+        self.find = Find::default();
 
         let title = format!("{} — ggl", repo_name(&repo));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -307,10 +363,13 @@ impl App {
         self.settings.recent.retain(|p| p != repo);
     }
 
-    /// 커밋 목록과 파일 트리(열려 있으면)를 다시 읽는다.
+    /// 커밋 목록과 파일 트리(열려 있으면)를 다시 읽는다. 내용 검색 결과도 새로 찾는다.
     pub fn refresh(&mut self) {
         self.reload();
         self.refresh_files();
+        if self.side == Side::Search && self.find.ran.is_some() {
+            self.run_find();
+        }
     }
 
     /// 파일 트리는 보이거나 연 파일이 있을 때만 읽는다. 연 파일은 트리를 받은 뒤 새 상태로 다시 읽는다.
@@ -329,15 +388,130 @@ impl App {
         }
     }
 
-    /// 파일 트리에서 누른 파일을 아래쪽에 연다.
-    pub fn open_file(&mut self, path: &str, status: Option<char>) {
-        let Some(repo) = self.repo.clone() else { return };
-        if self.file_view.as_ref().is_some_and(|v| v.path == path) {
+    /// 파일 트리나 검색 결과에서 누른 파일을 아래쪽에 연다. `line`이 있으면 그 줄로 스크롤한다.
+    pub fn open_file(&mut self, path: &str, status: Option<char>, line: Option<u32>) {
+        if let Some(view) = self.file_view.as_mut().filter(|v| v.path == path) {
+            if line.is_some() {
+                (view.goto, view.mark) = (line, line);
+            }
             return;
         }
+        self.leave(Leave::OpenFile(path.to_string(), status, line));
+    }
+
+    fn show_file(&mut self, path: &str, status: Option<char>, line: Option<u32>) {
+        let Some(repo) = self.repo.clone() else { return };
         self.diff = None;
         let _ = self.jobs.send(Job::File(repo, path.to_string(), status));
-        self.file_view = Some(FileView { path: path.to_string(), status, result: None });
+        self.file_view = Some(FileView { path: path.to_string(), status, result: None, goto: line, mark: line });
+    }
+
+    /// 트리에서 그 파일의 커밋 안 된 변경 상태
+    pub fn file_status(&self, path: &str) -> Option<char> {
+        match &self.tree {
+            Some(Ok(t)) => t.nodes.iter().find(|n| !n.dir && n.path == path).and_then(|n| n.status),
+            _ => None,
+        }
+    }
+
+    pub fn edit_dirty(&self) -> bool {
+        self.editor.as_ref().is_some_and(Editor::dirty)
+    }
+
+    /// 아래쪽에 연 파일을 편집하기 시작한다.
+    pub fn start_edit(&mut self) {
+        let (Some(repo), Some(view)) = (&self.repo, &self.file_view) else { return };
+        match Editor::open(repo, &view.path) {
+            Ok(editor) => self.editor = Some(editor),
+            Err(body) => self.notice = Some(Notice { title: "이 파일은 편집할 수 없어요".into(), body, error: true }),
+        }
+    }
+
+    /// 편집한 내용을 저장한다 (⌘S). 그사이 다른 곳에서 파일이 바뀌었으면 `force`가 아닌 한 묻는다.
+    pub fn save_edit(&mut self, force: bool) -> bool {
+        let (Some(repo), Some(editor)) = (self.repo.clone(), self.editor.as_mut()) else { return false };
+        let saved = match editor.save(&repo, force) {
+            Ok(saved) => {
+                (editor.conflict, editor.error) = (!saved, None);
+                saved
+            }
+            Err(e) => {
+                editor.error = Some(e);
+                false
+            }
+        };
+        if saved {
+            // 파일 감시보다 먼저 트리의 변경 표시와 검색 결과를 바꾼다.
+            self.refresh();
+        }
+        saved
+    }
+
+    /// 편집 중인 파일을 떠난다. 저장 안 한 변경이 있으면 확인 창을 띄우고 기다린다.
+    pub fn leave(&mut self, to: Leave) {
+        if self.edit_dirty() {
+            self.leaving = Some(to);
+        } else {
+            self.go(to);
+        }
+    }
+
+    /// 실제로 떠난다. 편집 중이던 내용은 버린다.
+    pub fn go(&mut self, to: Leave) {
+        self.leaving = None;
+        self.editor = None;
+        match to {
+            Leave::StopEditing => {}
+            Leave::CloseFile => self.file_view = None,
+            Leave::OpenFile(path, status, line) => self.show_file(&path, status, line),
+            Leave::OpenDiff(index) => self.show_diff(index),
+            Leave::OpenRepo(dir) => self.load_repo(&dir),
+            Leave::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    /// ⌘⇧F: 왼쪽 패널을 내용 검색으로 바꾸고 입력칸에 커서를 둔다.
+    pub fn open_find(&mut self) {
+        if !self.settings.show_files {
+            self.toggle_files();
+        }
+        self.side = Side::Search;
+        self.find.focus = true;
+    }
+
+    /// 검색어를 고치면 입력이 잠깐 멈출 때까지 기다렸다가 찾는다 (타자마다 git을 돌리지 않게).
+    pub fn find_changed(&mut self) {
+        let now = self.ctx.input(|i| i.time);
+        self.find.due = Some(now + 0.25);
+        self.ctx.request_repaint_after(Duration::from_millis(260));
+        self.update_find_names();
+    }
+
+    /// 내용 검색을 따로 스레드에서 돌린다. 새 결과가 올 때까지 이전 결과를 보여준다.
+    pub fn run_find(&mut self) {
+        self.find.due = None;
+        let Some(repo) = self.repo.clone() else { return };
+        if self.find.query.trim().is_empty() {
+            (self.find.ran, self.find.result, self.find.running) = (None, None, false);
+            return;
+        }
+        let key = (self.find.query.clone(), self.find.case);
+        self.find.ran = Some(key.clone());
+        self.find.running = true;
+        let (tx, ctx) = (self.reply_tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let result = git::grep(&repo, &key.0, key.1);
+            let _ = tx.send(Reply::Grep(repo, key, result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn update_find_names(&mut self) {
+        let q = self.find.query.trim().to_lowercase();
+        self.find.names = match &self.tree {
+            Some(Ok(tree)) if !q.is_empty() => tree.search(&q, 8),
+            _ => Vec::new(),
+        };
     }
 
     pub fn update_tree_matches(&mut self) {
@@ -474,6 +648,10 @@ impl App {
 
     /// 상세의 파일 목록에서 `index`번째 파일의 diff를 연다.
     pub fn open_diff(&mut self, index: usize) {
+        self.leave(Leave::OpenDiff(index));
+    }
+
+    fn show_diff(&mut self, index: usize) {
         let Some((hash, Ok(d))) = &self.details else { return };
         let Some(file) = d.files.get(index).cloned() else { return };
         let (hash, parents) = (hash.clone(), d.parents.clone());
@@ -618,6 +796,7 @@ impl App {
                     }
                     self.tree = Some(result);
                     self.update_tree_matches();
+                    self.update_find_names();
                 }
                 Reply::File(repo, path, result) => {
                     let current = self.file_view.as_mut().filter(|v| v.path == path);
@@ -625,10 +804,19 @@ impl App {
                         view.result = Some(result);
                     }
                 }
+                Reply::Grep(repo, key, result) => {
+                    if self.repo.as_ref() == Some(&repo) && self.find.ran.as_ref() == Some(&key) {
+                        self.find.result = Some(result);
+                        self.find.running = false;
+                    }
+                }
             }
         }
         if self.dirty.swap(false, Ordering::Relaxed) {
             self.refresh();
+        }
+        if self.find.due.is_some_and(|due| self.ctx.input(|i| i.time) >= due) {
+            self.run_find();
         }
         // 같은 저장소를 열려던 다른 ggl(herdr 단축키 등)이 넘긴 요청: 이 창을 앞으로 가져온다.
         while let Ok(req) = self.remote_rx.try_recv() {
@@ -654,7 +842,7 @@ impl App {
         match found {
             Some(i) => {
                 let result = self.diff.as_mut().and_then(|v| v.result.take());
-                self.open_diff(i);
+                self.show_diff(i);
                 // 새 결과가 올 때까지 이전 내용을 계속 보여줘서 깜빡이지 않게 한다.
                 if let Some(v) = self.diff.as_mut() {
                     v.result = result;
@@ -679,19 +867,21 @@ impl App {
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // 확인 창이 떠 있으면 키는 그 창이 받는다 (Enter 실행, Esc 취소).
-        if self.confirm.is_some() {
+        if self.confirm.is_some() || self.leaving.is_some() || self.editor.as_ref().is_some_and(|e| e.conflict) {
             return;
         }
         let typing = ctx.memory(|m| m.focused().is_some());
-        let (fetch, refresh, head, find, open, files, esc, up, down) = ctx.input_mut(|i| {
+        let (fetch, refresh, head, find_files, find, open, files, save, esc, up, down) = ctx.input_mut(|i| {
             (
-                // ⌘R 패턴은 Shift가 눌려 있어도 맞으므로 ⌘⇧R을 먼저 확인한다.
+                // ⌘R 패턴은 Shift가 눌려 있어도 맞으므로 ⌘⇧R을 먼저 확인한다. ⌘⇧F도 마찬가지.
                 i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R),
                 i.consume_key(Modifiers::COMMAND, Key::R),
                 i.consume_key(Modifiers::COMMAND, Key::H),
+                i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F),
                 i.consume_key(Modifiers::COMMAND, Key::F),
                 i.consume_key(Modifiers::COMMAND, Key::O),
                 i.consume_key(Modifiers::COMMAND, Key::B),
+                i.consume_key(Modifiers::COMMAND, Key::S),
                 !typing && i.consume_key(Modifiers::NONE, Key::Escape),
                 !typing && i.consume_key(Modifiers::NONE, Key::ArrowUp),
                 !typing && i.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -708,8 +898,13 @@ impl App {
                 self.scroll_to = Some(ScrollTo::Center(row));
             }
         }
-        if find {
+        if find_files {
+            self.open_find();
+        } else if find {
             self.focus_search = true;
+        }
+        if save && self.edit_dirty() {
+            self.save_edit(false);
         }
         if open {
             self.pick_folder();
@@ -720,8 +915,10 @@ impl App {
         if esc {
             if self.diff.is_some() {
                 self.diff = None;
+            } else if self.editor.is_some() {
+                self.leave(Leave::StopEditing);
             } else if self.file_view.is_some() {
-                self.file_view = None;
+                self.leave(Leave::CloseFile);
             } else {
                 self.close_details();
             }
@@ -746,6 +943,11 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // 창을 닫을 때(⌘Q 포함) 저장 안 한 편집이 있으면 먼저 묻는다.
+        if ui.ctx().input(|i| i.viewport().close_requested()) && self.edit_dirty() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.leaving = Some(Leave::Quit);
+        }
         self.handle_keys(&ui.ctx().clone());
         let pal = Palette::of(ui);
 
@@ -767,7 +969,7 @@ impl eframe::App for App {
                 .default_size(280.0)
                 .size_range(180.0..=(w * 0.6).max(180.0))
                 .frame(Frame::new().fill(pal.bg))
-                .show(ui, |ui| view::files::tree(self, ui));
+                .show(ui, |ui| view::files::side(self, ui));
         }
 
         // diff와 트리에서 연 파일은 아래쪽에 남은 폭 전체로 (위 경계를 끌어서 높이 조절)
@@ -792,6 +994,7 @@ impl eframe::App for App {
             .show(ui, |ui| view::table::show(self, ui));
 
         view::ops::confirm(self, ui.ctx());
+        view::edit::dialogs(self, ui.ctx());
 
         #[cfg(feature = "screenshot")]
         crate::devshot::tick(self, ui);

@@ -83,13 +83,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Some(Ok(d)) if d.lines.is_empty() => message(ui, "내용 변경은 없어요 (이름이나 권한만 바뀜)", pal.weak),
         Some(Ok(d)) => {
             let id = egui::Id::new(("diff", &view.hash, &view.file.path));
-            lines(ui, d, id, &pal);
+            lines(ui, d, id, &pal, None, None);
         }
     }
 }
 
 /// 줄 목록. 파일 내용 그대로(`plain`)면 줄 번호 칸이 하나다.
-pub fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
+/// `jump` 행이 있으면 그 행이 위쪽 1/3쯤에 오게 스크롤하고, `mark` 행은 칠해 둔다.
+pub fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette, jump: Option<usize>, mark: Option<usize>) {
     let mono = FontId::monospace(LABEL);
     let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&mono, '0'));
     let max_no = d.lines.iter().map(|l| l.old.max(l.new)).max().unwrap_or(0);
@@ -101,7 +102,11 @@ pub fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
 
     ui.spacing_mut().item_spacing.y = 0.0;
     let n = d.lines.len() + usize::from(d.truncated);
-    ScrollArea::both().id_salt(id).auto_shrink([false, false]).show_rows(ui, LINE_H, n, |ui, range| {
+    let mut area = ScrollArea::both().id_salt(id).auto_shrink([false, false]);
+    if let Some(row) = jump {
+        area = area.vertical_scroll_offset((row as f32 * LINE_H - ui.available_height() / 3.0).max(0.0));
+    }
+    area.show_rows(ui, LINE_H, n, |ui, range| {
         let clip = ui.clip_rect();
         let p = ui.painter().clone();
         for i in range {
@@ -122,6 +127,10 @@ pub fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
             if let Some(bg) = bg {
                 p.rect_filled(rect, 0.0, bg);
             }
+            let marked = mark == Some(i);
+            if marked {
+                p.rect_filled(rect, 0.0, pal.found);
+            }
             p.text(pos2(rect.left() + gutter_w, cy), Align2::LEFT_CENTER, &l.text, mono.clone(), color);
 
             // 고정된 줄 번호 칸
@@ -129,6 +138,10 @@ pub fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
             p.rect_filled(g, 0.0, gutter_bg);
             if let Some(bg) = bg {
                 p.rect_filled(g, 0.0, bg);
+            }
+            if marked {
+                p.rect_filled(g, 0.0, pal.found);
+                p.rect_filled(Rect::from_min_size(g.min, vec2(3.0, LINE_H)), 0.0, Color32::from_rgb(0xff, 0xb3, 0x00));
             }
             let num = |n: u32, x: f32| {
                 if n > 0 {

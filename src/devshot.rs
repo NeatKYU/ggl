@@ -6,7 +6,9 @@
 //! [GGL_MENU=행번호] 그 행을 오른쪽 클릭해서 메뉴를 띄운 채 찍는다
 //! [GGL_SCROLL=행수] 처음부터 그 행까지 스크롤하며 글자를 그려본다 (오래 켜둘 때 메모리 확인용)
 //! [GGL_FILES=1] 파일 트리를 켠다  [GGL_EXPAND=폴더,폴더] 그 폴더를 펼친다  [GGL_TREE_SEARCH=검색어]
-//! [GGL_FILE=경로] 트리에서 그 파일을 연다
+//! [GGL_FILE=경로] 트리에서 그 파일을 연다  [GGL_LINE=줄] 그 줄로 연다
+//! [GGL_FIND=검색어] ⌘⇧F 내용 검색  [GGL_EDIT=1] 연 파일을 편집 모드로  [GGL_TYPE=글자] 편집기 맨 앞에 입력 (저장하지 않음)
+//! [GGL_LEAVE=1] 그다음 파일을 닫으려 해서 "저장하지 않은 변경" 확인 창을 띄운다
 //! 데이터(와 상세)가 다 불러와지면 화면을 저장하고 종료한다.
 
 use std::sync::Mutex;
@@ -89,6 +91,12 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
             if let Ok(q) = std::env::var("GGL_TREE_SEARCH") {
                 app.tree_filter = q;
             }
+            if let Ok(q) = std::env::var("GGL_FIND") {
+                app.open_find();
+                app.find.query = q;
+                app.find_changed();
+                app.run_find();
+            }
             if let Ok(q) = std::env::var("GGL_SEARCH") {
                 app.search = q;
                 app.update_matches();
@@ -110,6 +118,7 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
         }
         1 if app.fetch_state == crate::app::FetchState::Running || app.loading => {}
         1 if app.settings.show_files && app.tree.is_none() => {}
+        1 if app.find.running => {}
         1 if (app.selected.is_none() || app.details.is_some()) && waited(ui) => {
             let file = std::env::var("GGL_FILE").ok();
             match std::env::var("GGL_DIFF").ok().and_then(|s| s.parse().ok()) {
@@ -121,9 +130,19 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
                         Some(Ok(t)) => t.nodes.iter().find(|n| n.path == path).and_then(|n| n.status),
                         _ => None,
                     };
-                    app.open_file(&path, status);
+                    let line = std::env::var("GGL_LINE").ok().and_then(|s| s.parse().ok());
+                    app.open_file(&path, status, line);
                 }
                 _ if app.file_view.as_ref().is_some_and(|v| v.result.is_none()) => {}
+                _ if std::env::var("GGL_EDIT").is_ok() && app.editor.is_none() => {
+                    app.start_edit();
+                    if let (Some(ed), Ok(text)) = (app.editor.as_mut(), std::env::var("GGL_TYPE")) {
+                        ed.text.insert_str(0, &text);
+                    }
+                    if std::env::var("GGL_LEAVE").is_ok() {
+                        app.leave(crate::app::Leave::CloseFile);
+                    }
+                }
                 _ => STAGE.store(2, Ordering::Relaxed),
             }
         }

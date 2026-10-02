@@ -9,6 +9,9 @@ eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "de
 libc = "0.2.189"
 memmap2 = "0.9.11"
 notify = "8.2.0"
+# ⌘Q(메뉴의 종료)를 창 닫기로 바꿔서 저장 안 한 편집을 물어볼 수 있게 한다 (rfd가 이미 쓰는 버전)
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
