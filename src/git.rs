@@ -4,7 +4,7 @@
 //! (`git status`가 `.git/index`를 갱신하면 파일 감시가 다시 새로고침을 부르는 루프가 생긴다.)
 //! 저장소를 바꾸는 명령(fetch, checkout, merge …)은 `run`으로만 실행한다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -594,6 +594,8 @@ pub struct Diff {
     pub truncated: bool,
     /// 가장 긴 줄의 표시 폭 (한글·한자는 2칸)
     pub max_cols: usize,
+    /// 변경이 아니라 파일 내용 그대로면 true (줄 번호 칸을 하나만 쓴다)
+    pub plain: bool,
 }
 
 const MAX_DIFF_LINES: usize = 50_000;
@@ -687,23 +689,121 @@ fn push_line(diff: &mut Diff, kind: LineKind, old: u32, new: u32, text: &str) {
 
 /// 추적 안 되는 새 파일은 git diff로 볼 수 없어서 직접 읽어 "전부 추가"로 보여준다.
 fn untracked_diff(repo: &Path, path: &str) -> Result<Diff, String> {
-    let full = repo.join(path);
-    let meta = std::fs::metadata(&full).map_err(|e| format!("파일을 읽을 수 없어요: {e}"))?;
     let mut diff = Diff::default();
-    if meta.len() > MAX_UNTRACKED_BYTES {
-        diff.truncated = true;
-        return Ok(diff);
-    }
-    let bytes = std::fs::read(&full).map_err(|e| format!("파일을 읽을 수 없어요: {e}"))?;
-    if bytes.iter().take(8000).any(|&b| b == 0) {
-        diff.binary = true;
-        return Ok(diff);
-    }
-    let text = String::from_utf8_lossy(&bytes);
+    let Some(text) = read_text(&repo.join(path), &mut diff)? else { return Ok(diff) };
     let count = text.lines().count();
     push_line(&mut diff, LineKind::Hunk, 0, 0, &format!("@@ -0,0 +1,{count} @@ 새 파일"));
     for (i, line) in text.lines().enumerate().take(MAX_DIFF_LINES) {
         push_line(&mut diff, LineKind::Added, 0, i as u32 + 1, line);
+    }
+    diff.truncated = count > MAX_DIFF_LINES;
+    Ok(diff)
+}
+
+/// 작업 폴더의 파일을 글자로 읽는다. 너무 크거나 바이너리면 `diff`에 표시하고 None을 돌려준다.
+fn read_text(full: &Path, diff: &mut Diff) -> Result<Option<String>, String> {
+    let meta = std::fs::metadata(full).map_err(|e| format!("파일을 읽을 수 없어요: {e}"))?;
+    if meta.is_dir() {
+        return Err("폴더예요 (하위 모듈일 수 있어요)".into());
+    }
+    if meta.len() > MAX_UNTRACKED_BYTES {
+        diff.truncated = true;
+        return Ok(None);
+    }
+    let bytes = std::fs::read(full).map_err(|e| format!("파일을 읽을 수 없어요: {e}"))?;
+    if bytes.iter().take(8000).any(|&b| b == 0) {
+        diff.binary = true;
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// 파일 트리에 보여줄 파일 하나
+#[derive(Clone, Debug)]
+pub struct TreeFile {
+    pub path: String,
+    /// 커밋 안 된 변경 (M, A, D, R, T, U = 추적 안 됨, ! = 충돌). 그대로면 None
+    pub status: Option<char>,
+}
+
+/// 파일 트리용 목록: 추적 중인 파일과 무시되지 않은 새 파일. `.gitignore`에 걸린 파일은 빠진다.
+pub fn tree_files(repo: &Path) -> Result<Vec<TreeFile>, String> {
+    let listed = git(repo, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+    let mut status = worktree_status(repo);
+    let mut seen = HashSet::new();
+    // 충돌 중인 파일은 단계마다 한 번씩 나오므로 한 번만 넣는다.
+    let mut files: Vec<TreeFile> = listed
+        .split('\0')
+        .filter(|p| !p.is_empty() && seen.insert(*p))
+        .map(|p| TreeFile { path: p.to_string(), status: status.remove(p) })
+        .collect();
+    // `git rm`으로 지운 파일은 목록에 없지만, 지워진 것도 변경이라 보여준다.
+    files.extend(
+        status.into_iter().filter(|(_, s)| *s == 'D').map(|(path, s)| TreeFile { path, status: Some(s) }),
+    );
+    Ok(files)
+}
+
+/// 커밋 안 된 변경이 있는 파일과 그 상태
+fn worktree_status(repo: &Path) -> HashMap<String, char> {
+    parse_status(&git(repo, &["status", "--porcelain", "-z", "--untracked-files=all"]).unwrap_or_default())
+}
+
+fn parse_status(out: &str) -> HashMap<String, char> {
+    let mut map = HashMap::new();
+    let mut tokens = out.split('\0');
+    while let Some(entry) = tokens.next() {
+        let b = entry.as_bytes();
+        if b.len() < 4 {
+            continue;
+        }
+        let (x, y) = (b[0] as char, b[1] as char);
+        // 이름이 바뀐 파일은 다음 칸에 이전 경로가 온다.
+        if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            tokens.next();
+        }
+        let s = match (x, y) {
+            ('?', _) => 'U',
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => '!',
+            ('A' | 'R', _) => x,
+            (_, ' ') => x,
+            _ => y,
+        };
+        map.insert(entry[3..].to_string(), s);
+    }
+    map
+}
+
+/// 파일 트리에서 연 파일의 내용.
+/// 바뀐 파일은 전체 내용에 바뀐 줄을 표시하고(HEAD와 비교), 그대로인 파일은 내용만 보여준다.
+pub fn worktree_file(repo: &Path, path: &str, status: Option<char>) -> Result<Diff, String> {
+    match status {
+        Some('U') => untracked_diff(repo, path),
+        Some(s) if git(repo, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() => {
+            if s != 'D' {
+                // 너무 큰 파일은 git diff를 돌리기 전에 거른다.
+                let mut diff = Diff::default();
+                if read_text(&repo.join(path), &mut diff)?.is_none() {
+                    return Ok(diff);
+                }
+            }
+            let mut d = parse_diff(&git(repo, &["diff", "--no-ext-diff", "-U1000000", "HEAD", "--", path])?);
+            // 문맥을 파일 전체로 잡았으니 구간은 하나뿐이다. 구간 머리는 보여줄 필요가 없다.
+            d.lines.retain(|l| l.kind != LineKind::Hunk);
+            // 권한만 바뀌었거나 되돌린 직후면 diff가 비어 있다.
+            if d.lines.is_empty() && !d.binary { plain_file(repo, path) } else { Ok(d) }
+        }
+        _ => plain_file(repo, path),
+    }
+}
+
+/// 바뀌지 않은 파일: 내용 그대로, 줄 번호 하나
+fn plain_file(repo: &Path, path: &str) -> Result<Diff, String> {
+    let mut diff = Diff { plain: true, ..Default::default() };
+    let Some(text) = read_text(&repo.join(path), &mut diff)? else { return Ok(diff) };
+    let count = text.lines().count();
+    for (i, line) in text.lines().enumerate().take(MAX_DIFF_LINES) {
+        push_line(&mut diff, LineKind::Context, 0, i as u32 + 1, line);
     }
     diff.truncated = count > MAX_DIFF_LINES;
     Ok(diff)
@@ -790,5 +890,21 @@ mod tests {
         assert_eq!(stats["a.txt"], (Some(3), Some(1)));
         assert_eq!(stats["new.rs"], (Some(0), Some(0)));
         assert_eq!(stats["img.png"], (None, None));
+    }
+
+    #[test]
+    fn parses_porcelain_status() {
+        let out = " M src/a.rs\0A  new.rs\0AM added-then-edited.rs\0R  b.rs\0old-b.rs\0\
+                   ?? 새 파일.txt\0UU conflict.rs\0D  gone.rs\0 D missing.rs\0";
+        let s = parse_status(out);
+        assert_eq!(s["src/a.rs"], 'M');
+        assert_eq!(s["new.rs"], 'A');
+        assert_eq!(s["added-then-edited.rs"], 'A');
+        assert_eq!(s["b.rs"], 'R');
+        assert!(!s.contains_key("old-b.rs"));
+        assert_eq!(s["새 파일.txt"], 'U');
+        assert_eq!(s["conflict.rs"], '!');
+        assert_eq!(s["gone.rs"], 'D');
+        assert_eq!(s["missing.rs"], 'D');
     }
 }

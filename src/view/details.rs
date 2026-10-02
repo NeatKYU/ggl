@@ -281,6 +281,7 @@ pub fn status_style(status: char, pal: &Palette) -> (&'static str, Color32, &'st
         'C' => ("C", blue, "복사됨"),
         'U' => ("U", pal.added, "새 파일 (추적 안 됨)"),
         'T' => ("T", amber, "형식 바뀜"),
+        '!' => ("!", pal.deleted, "충돌"),
         _ => ("M", amber, "수정됨"),
     }
 }

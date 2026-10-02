@@ -5,6 +5,8 @@
 //! [GGL_PUSH=1] 현재 브랜치 푸시를 눌러 확인 창을 띄운 채 찍는다 (실행하지 않음)
 //! [GGL_MENU=행번호] 그 행을 오른쪽 클릭해서 메뉴를 띄운 채 찍는다
 //! [GGL_SCROLL=행수] 처음부터 그 행까지 스크롤하며 글자를 그려본다 (오래 켜둘 때 메모리 확인용)
+//! [GGL_FILES=1] 파일 트리를 켠다  [GGL_EXPAND=폴더,폴더] 그 폴더를 펼친다  [GGL_TREE_SEARCH=검색어]
+//! [GGL_FILE=경로] 트리에서 그 파일을 연다
 //! 데이터(와 상세)가 다 불러와지면 화면을 저장하고 종료한다.
 
 use std::sync::Mutex;
@@ -78,6 +80,15 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
                 Ok("dark") => ctx.set_theme(egui::ThemePreference::Dark),
                 _ => {}
             }
+            if std::env::var("GGL_FILES").is_ok() && !app.settings.show_files {
+                app.toggle_files();
+            }
+            if let Ok(dirs) = std::env::var("GGL_EXPAND") {
+                app.tree_open.extend(dirs.split(',').map(str::to_string));
+            }
+            if let Ok(q) = std::env::var("GGL_TREE_SEARCH") {
+                app.tree_filter = q;
+            }
             if let Ok(q) = std::env::var("GGL_SEARCH") {
                 app.search = q;
                 app.update_matches();
@@ -98,10 +109,21 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
             STAGE.store(1, Ordering::Relaxed);
         }
         1 if app.fetch_state == crate::app::FetchState::Running || app.loading => {}
+        1 if app.settings.show_files && app.tree.is_none() => {}
         1 if (app.selected.is_none() || app.details.is_some()) && waited(ui) => {
+            let file = std::env::var("GGL_FILE").ok();
             match std::env::var("GGL_DIFF").ok().and_then(|s| s.parse().ok()) {
                 Some(i) if app.diff.is_none() => app.open_diff(i),
                 _ if app.diff.as_ref().is_some_and(|d| d.result.is_none()) => {}
+                _ if file.is_some() && app.file_view.is_none() => {
+                    let path = file.unwrap_or_default();
+                    let status = match &app.tree {
+                        Some(Ok(t)) => t.nodes.iter().find(|n| n.path == path).and_then(|n| n.status),
+                        _ => None,
+                    };
+                    app.open_file(&path, status);
+                }
+                _ if app.file_view.as_ref().is_some_and(|v| v.result.is_none()) => {}
                 _ => STAGE.store(2, Ordering::Relaxed),
             }
         }

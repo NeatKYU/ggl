@@ -1,4 +1,4 @@
-//! 위쪽 도구 모음: 저장소 선택, 브랜치 필터, 리모트 표시, 검색, 새로고침, 리모트 새로고침, 푸시
+//! 위쪽 도구 모음: 파일 트리, 저장소 선택, 브랜치 필터, 리모트 표시, 검색, 새로고침, 리모트 새로고침, 푸시
 
 use std::path::PathBuf;
 
@@ -11,6 +11,10 @@ use crate::style::Palette;
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let pal = Palette::of(ui);
     ui.horizontal(|ui| {
+        let files = ui.selectable_label(app.settings.show_files, "파일");
+        if files.on_hover_text("파일 트리 보기/숨기기 (⌘B)").clicked() {
+            app.toggle_files();
+        }
         repo_picker(app, ui, &pal);
         branch_picker(app, ui);
         if ui.checkbox(&mut app.settings.show_remotes, "리모트 브랜치").changed() {
@@ -20,7 +24,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let busy = app.loading && app.data.is_some();
             if ui.button("새로고침").on_hover_text("다시 불러오기 (⌘R)").clicked() {
-                app.reload();
+                app.refresh();
             }
             fetch_button(app, ui);
             push_button(app, ui);

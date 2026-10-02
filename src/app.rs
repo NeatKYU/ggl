@@ -1,6 +1,6 @@
 //! 앱 상태. git 작업은 백그라운드 스레드에서 돌리고, 화면은 결과만 그린다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::git::{self, Details, Diff, FileChange, LoadRequest, RefLabel, Snapshot};
 use crate::graph::{self, Layout, OFFSCREEN};
 use crate::ops::{self, Item, Op};
+use crate::remote::{self, Request};
 use crate::style::Palette;
+use crate::tree::FileTree;
 use crate::view;
 use crate::watcher::RepoWatcher;
 
@@ -30,11 +32,13 @@ pub struct Settings {
     /// 커밋 상세(인라인) 높이와, 왼쪽(요약) 칸이 차지하는 비율
     pub details_height: f32,
     pub details_split: f32,
+    /// 왼쪽 파일 트리를 보여줄지
+    pub show_files: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { recent: Vec::new(), show_remotes: true, details_height: 260.0, details_split: 0.5 }
+        Self { recent: Vec::new(), show_remotes: true, details_height: 260.0, details_split: 0.5, show_files: false }
     }
 }
 
@@ -43,6 +47,13 @@ pub struct DiffView {
     pub hash: String,
     pub index: usize,
     pub file: FileChange,
+    pub result: Option<Result<Diff, String>>,
+}
+
+/// 파일 트리에서 연 파일 (아래쪽 패널)
+pub struct FileView {
+    pub path: String,
+    pub status: Option<char>,
     pub result: Option<Result<Diff, String>>,
 }
 
@@ -73,6 +84,8 @@ enum Job {
     Load(u64, LoadRequest),
     Details(PathBuf, String),
     Diff(PathBuf, String, Vec<String>, FileChange),
+    Tree(PathBuf),
+    File(PathBuf, String, Option<char>),
 }
 
 /// 리모트 새로고침(fetch) 상태
@@ -103,6 +116,8 @@ enum Reply {
     Loaded(u64, Result<Loaded, String>),
     Details(PathBuf, String, Result<Details, String>),
     Diff(PathBuf, String, String, Result<Diff, String>),
+    Tree(PathBuf, Result<FileTree, String>),
+    File(PathBuf, String, Result<Diff, String>),
 }
 
 /// 스크롤 요청: 가운데로 보낼지, 화면 밖일 때만 살짝 움직일지
@@ -136,6 +151,15 @@ pub struct App {
     pub details: Option<(String, Result<Details, String>)>,
     pub diff: Option<DiffView>,
 
+    /// 왼쪽 파일 트리
+    pub tree: Option<Result<FileTree, String>>,
+    /// 펼친 폴더 경로
+    pub tree_open: HashSet<String>,
+    pub tree_filter: String,
+    /// 트리 검색어에 맞는 파일 (트리 노드 번호)
+    pub tree_matches: Vec<usize>,
+    pub file_view: Option<FileView>,
+
     pub search: String,
     pub matches: Vec<usize>,
     pub match_pos: usize,
@@ -152,15 +176,21 @@ pub struct App {
     reply_tx: Sender<Reply>,
     watcher: Option<RepoWatcher>,
     dirty: Arc<AtomicBool>,
+    /// 같은 저장소를 다시 열려는 다른 ggl의 요청을 받는다
+    remote: Option<remote::Listener>,
+    remote_tx: Sender<Request>,
+    remote_rx: Receiver<Request>,
     ctx: egui::Context,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, arg_repo: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, arg_repo: Option<PathBuf>, show_files: bool) -> Self {
         crate::style::install(&cc.egui_ctx);
-        let settings: Settings =
+        let mut settings: Settings =
             cc.storage.and_then(|s| eframe::get_value(s, "settings")).unwrap_or_default();
+        settings.show_files |= show_files;
         let (jobs, replies, reply_tx) = spawn_worker(cc.egui_ctx.clone());
+        let (remote_tx, remote_rx) = mpsc::channel();
         let mut app = Self {
             settings,
             repo: None,
@@ -179,6 +209,11 @@ impl App {
             selected: None,
             details: None,
             diff: None,
+            tree: None,
+            tree_open: HashSet::new(),
+            tree_filter: String::new(),
+            tree_matches: Vec::new(),
+            file_view: None,
             search: String::new(),
             matches: Vec::new(),
             match_pos: 0,
@@ -191,6 +226,9 @@ impl App {
             reply_tx,
             watcher: None,
             dirty: Arc::new(AtomicBool::new(false)),
+            remote: None,
+            remote_tx,
+            remote_rx,
             ctx: cc.egui_ctx.clone(),
         };
         let start = arg_repo.or_else(|| app.settings.recent.first().cloned());
@@ -227,6 +265,11 @@ impl App {
         self.matches.clear();
         self.scroll_to = None;
         self.scroll_offset = 0.0;
+        self.tree = None;
+        self.tree_open.clear();
+        self.tree_filter.clear();
+        self.tree_matches.clear();
+        self.file_view = None;
 
         let title = format!("{} — ggl", repo_name(&repo));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -238,8 +281,15 @@ impl App {
             ctx.request_repaint();
         })
         .ok();
+        // 이전 저장소의 소켓을 먼저 닫아야 같은 저장소를 다시 열 때도 받을 수 있다.
+        self.remote = None;
+        let (tx, ctx) = (self.remote_tx.clone(), self.ctx.clone());
+        self.remote = remote::Listener::start(&repo, move |req| {
+            let _ = tx.send(req);
+            ctx.request_repaint();
+        });
         self.repo = Some(repo);
-        self.reload();
+        self.refresh();
     }
 
     pub fn pick_folder(&mut self) {
@@ -255,6 +305,47 @@ impl App {
 
     pub fn forget_repo(&mut self, repo: &Path) {
         self.settings.recent.retain(|p| p != repo);
+    }
+
+    /// 커밋 목록과 파일 트리(열려 있으면)를 다시 읽는다.
+    pub fn refresh(&mut self) {
+        self.reload();
+        self.refresh_files();
+    }
+
+    /// 파일 트리는 보이거나 연 파일이 있을 때만 읽는다. 연 파일은 트리를 받은 뒤 새 상태로 다시 읽는다.
+    fn refresh_files(&mut self) {
+        let Some(repo) = self.repo.clone() else { return };
+        if self.settings.show_files || self.file_view.is_some() {
+            let _ = self.jobs.send(Job::Tree(repo));
+        }
+    }
+
+    /// 파일 트리를 켜고 끈다 (⌘B).
+    pub fn toggle_files(&mut self) {
+        self.settings.show_files = !self.settings.show_files;
+        if self.settings.show_files {
+            self.refresh_files();
+        }
+    }
+
+    /// 파일 트리에서 누른 파일을 아래쪽에 연다.
+    pub fn open_file(&mut self, path: &str, status: Option<char>) {
+        let Some(repo) = self.repo.clone() else { return };
+        if self.file_view.as_ref().is_some_and(|v| v.path == path) {
+            return;
+        }
+        self.diff = None;
+        let _ = self.jobs.send(Job::File(repo, path.to_string(), status));
+        self.file_view = Some(FileView { path: path.to_string(), status, result: None });
+    }
+
+    pub fn update_tree_matches(&mut self) {
+        let q = self.tree_filter.trim().to_lowercase();
+        self.tree_matches = match &self.tree {
+            Some(Ok(tree)) if !q.is_empty() => tree.search(&q, 500),
+            _ => Vec::new(),
+        };
     }
 
     pub fn reload(&mut self) {
@@ -388,6 +479,7 @@ impl App {
         let (hash, parents) = (hash.clone(), d.parents.clone());
         self.request_diff(&hash, parents, file.clone());
         let opening = self.diff.is_none();
+        self.file_view = None;
         self.diff = Some(DiffView { hash, index, file, result: None });
         // 아래에 diff가 열리면 표가 짧아지니, 선택한 커밋과 상세가 가려지지 않게 한다.
         if opening {
@@ -480,7 +572,7 @@ impl App {
                         self.notice = Some(Notice { title: op.failed().into(), body, error: true });
                     }
                     // 실패해도 충돌 상태 등이 남을 수 있으니 항상 다시 읽는다.
-                    self.reload();
+                    self.refresh();
                 }
                 Reply::Loaded(generation, result) if generation == self.generation => {
                     self.loading = false;
@@ -514,10 +606,37 @@ impl App {
                         view.result = Some(result);
                     }
                 }
+                Reply::Tree(repo, result) => {
+                    if self.repo.as_ref() != Some(&repo) {
+                        continue;
+                    }
+                    // 연 파일의 상태(수정됨, 새 파일 …)가 바뀌었을 수 있으니 새 상태로 다시 읽는다.
+                    // 새 내용이 올 때까지는 이전 내용을 그대로 보여준다.
+                    if let (Ok(tree), Some(view)) = (&result, &mut self.file_view) {
+                        view.status = tree.nodes.iter().find(|n| !n.dir && n.path == view.path).and_then(|n| n.status);
+                        let _ = self.jobs.send(Job::File(repo, view.path.clone(), view.status));
+                    }
+                    self.tree = Some(result);
+                    self.update_tree_matches();
+                }
+                Reply::File(repo, path, result) => {
+                    let current = self.file_view.as_mut().filter(|v| v.path == path);
+                    if let (true, Some(view)) = (self.repo.as_ref() == Some(&repo), current) {
+                        view.result = Some(result);
+                    }
+                }
             }
         }
         if self.dirty.swap(false, Ordering::Relaxed) {
-            self.reload();
+            self.refresh();
+        }
+        // 같은 저장소를 열려던 다른 ggl(herdr 단축키 등)이 넘긴 요청: 이 창을 앞으로 가져온다.
+        while let Ok(req) = self.remote_rx.try_recv() {
+            if req == Request::Files && !self.settings.show_files {
+                self.toggle_files();
+            }
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
     }
 
@@ -564,7 +683,7 @@ impl App {
             return;
         }
         let typing = ctx.memory(|m| m.focused().is_some());
-        let (fetch, refresh, head, find, open, esc, up, down) = ctx.input_mut(|i| {
+        let (fetch, refresh, head, find, open, files, esc, up, down) = ctx.input_mut(|i| {
             (
                 // ⌘R 패턴은 Shift가 눌려 있어도 맞으므로 ⌘⇧R을 먼저 확인한다.
                 i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::R),
@@ -572,6 +691,7 @@ impl App {
                 i.consume_key(Modifiers::COMMAND, Key::H),
                 i.consume_key(Modifiers::COMMAND, Key::F),
                 i.consume_key(Modifiers::COMMAND, Key::O),
+                i.consume_key(Modifiers::COMMAND, Key::B),
                 !typing && i.consume_key(Modifiers::NONE, Key::Escape),
                 !typing && i.consume_key(Modifiers::NONE, Key::ArrowUp),
                 !typing && i.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -580,7 +700,7 @@ impl App {
         if fetch {
             self.fetch();
         } else if refresh {
-            self.reload();
+            self.refresh();
         }
         if head {
             let row = self.data.as_ref().and_then(|d| d.rows.get(d.snap.head.as_ref()?).copied());
@@ -594,9 +714,14 @@ impl App {
         if open {
             self.pick_folder();
         }
+        if files {
+            self.toggle_files();
+        }
         if esc {
             if self.diff.is_some() {
                 self.diff = None;
+            } else if self.file_view.is_some() {
+                self.file_view = None;
             } else {
                 self.close_details();
             }
@@ -634,15 +759,32 @@ impl eframe::App for App {
                 .show(ui, |ui| view::ops::banner(self, ui));
         }
 
-        // diff는 아래쪽에 가로 전체 폭으로 (위 경계를 끌어서 높이 조절)
-        if self.diff.is_some() {
+        // 파일 트리는 왼쪽에 위아래 전체 높이로 (오른쪽 경계를 끌어서 폭 조절)
+        if self.settings.show_files {
+            let w = ui.available_width();
+            egui::Panel::left("files")
+                .resizable(true)
+                .default_size(280.0)
+                .size_range(180.0..=(w * 0.6).max(180.0))
+                .frame(Frame::new().fill(pal.bg))
+                .show(ui, |ui| view::files::tree(self, ui));
+        }
+
+        // diff와 트리에서 연 파일은 아래쪽에 남은 폭 전체로 (위 경계를 끌어서 높이 조절)
+        if self.diff.is_some() || self.file_view.is_some() {
             let h = ui.available_height();
             egui::Panel::bottom("diff-bottom")
                 .resizable(true)
                 .default_size((h * 0.45).max(200.0))
                 .size_range(150.0..=(h - 160.0).max(150.0))
                 .frame(Frame::new().fill(pal.bg))
-                .show(ui, |ui| view::diff::show(self, ui));
+                .show(ui, |ui| {
+                    if self.diff.is_some() {
+                        view::diff::show(self, ui);
+                    } else {
+                        view::files::file(self, ui);
+                    }
+                });
         }
 
         egui::CentralPanel::default()
@@ -687,11 +829,15 @@ fn spawn_worker(ctx: egui::Context) -> (Sender<Job>, Receiver<Reply>, Sender<Rep
             let mut load = None;
             let mut details = None;
             let mut diff = None;
+            let mut tree = None;
+            let mut file = None;
             for job in std::iter::once(first).chain(job_rx.try_iter()) {
                 match job {
                     Job::Load(..) => load = Some(job),
                     Job::Details(..) => details = Some(job),
                     Job::Diff(..) => diff = Some(job),
+                    Job::Tree(..) => tree = Some(job),
+                    Job::File(..) => file = Some(job),
                 }
             }
             if let Some(Job::Details(repo, hash)) = details {
@@ -704,6 +850,20 @@ fn spawn_worker(ctx: egui::Context) -> (Sender<Job>, Receiver<Reply>, Sender<Rep
             if let Some(Job::Diff(repo, hash, parents, file)) = diff {
                 let result = git::file_diff(&repo, &hash, &parents, &file);
                 if reply_tx.send(Reply::Diff(repo, hash, file.path, result)).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+            if let Some(Job::File(repo, path, status)) = file {
+                let result = git::worktree_file(&repo, &path, status);
+                if reply_tx.send(Reply::File(repo, path, result)).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+            if let Some(Job::Tree(repo)) = tree {
+                let result = git::tree_files(&repo).map(FileTree::build);
+                if reply_tx.send(Reply::Tree(repo, result)).is_err() {
                     return;
                 }
                 ctx.request_repaint();

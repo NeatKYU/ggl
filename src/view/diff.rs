@@ -88,13 +88,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
+/// 줄 목록. 파일 내용 그대로(`plain`)면 줄 번호 칸이 하나다.
+pub fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
     let mono = FontId::monospace(LABEL);
     let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&mono, '0'));
     let max_no = d.lines.iter().map(|l| l.old.max(l.new)).max().unwrap_or(0);
     let digits = max_no.to_string().len().max(3) as f32;
     let num_w = digits * char_w + 14.0;
-    let gutter_w = num_w * 2.0 + 18.0;
+    let gutter_w = if d.plain { num_w + 10.0 } else { num_w * 2.0 + 18.0 };
     let content_w = (gutter_w + d.max_cols as f32 * char_w + 40.0).max(ui.available_width());
     let gutter_bg = if pal.bg.r() < 128 { Color32::from_gray(0x23) } else { Color32::from_gray(0xf6) };
 
@@ -134,6 +135,10 @@ fn lines(ui: &mut egui::Ui, d: &Diff, id: egui::Id, pal: &Palette) {
                     p.text(pos2(x, cy), Align2::RIGHT_CENTER, n.to_string(), mono.clone(), pal.weak);
                 }
             };
+            if d.plain {
+                num(l.new, g.left() + num_w - 6.0);
+                continue;
+            }
             num(l.old, g.left() + num_w - 6.0);
             num(l.new, g.left() + num_w * 2.0 - 6.0);
             p.text(pos2(g.left() + num_w * 2.0 + 4.0, cy), Align2::LEFT_CENTER, marker, mono.clone(), pal.weak);
