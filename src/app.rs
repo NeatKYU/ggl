@@ -17,7 +17,7 @@ use crate::graph::{self, Layout, OFFSCREEN};
 use crate::ops::{self, Item, Op};
 use crate::remote::{self, Request};
 use crate::style::Palette;
-use crate::tree::FileTree;
+use crate::tree::{FileTree, Hit};
 use crate::view;
 use crate::watcher::RepoWatcher;
 
@@ -85,6 +85,16 @@ pub struct Find {
     due: Option<f64>,
     /// 이름이 맞는 파일 (트리 노드 번호)
     pub names: Vec<usize>,
+}
+
+/// 빠른 열기 (⌃P): 파일 이름 일부로 저장소 파일을 찾아 연다
+#[derive(Default)]
+pub struct Quick {
+    pub query: String,
+    /// 고른 결과 (`hits`의 번호)
+    pub sel: usize,
+    pub hits: Vec<Hit>,
+    pub focus: bool,
 }
 
 /// 편집 중인 파일을 떠나는 동작. 저장 안 한 변경이 있으면 먼저 묻는다.
@@ -202,6 +212,7 @@ pub struct App {
     pub file_view: Option<FileView>,
     pub side: Side,
     pub find: Find,
+    pub quick: Option<Quick>,
     /// 아래쪽에서 편집 중인 파일 (`file_view`와 같은 파일)
     pub editor: Option<Editor>,
     /// 저장 안 한 편집이 있어서 확인 창으로 물어보는 중인 이동
@@ -263,6 +274,7 @@ impl App {
             file_view: None,
             side: Side::Files,
             find: Find::default(),
+            quick: None,
             editor: None,
             leaving: None,
             search: String::new(),
@@ -326,6 +338,7 @@ impl App {
         self.tree_matches.clear();
         self.file_view = None;
         self.find = Find::default();
+        self.quick = None;
 
         let title = format!("{} — ggl", repo_name(&repo));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -375,7 +388,7 @@ impl App {
     /// 파일 트리는 보이거나 연 파일이 있을 때만 읽는다. 연 파일은 트리를 받은 뒤 새 상태로 다시 읽는다.
     fn refresh_files(&mut self) {
         let Some(repo) = self.repo.clone() else { return };
-        if self.settings.show_files || self.file_view.is_some() {
+        if self.settings.show_files || self.file_view.is_some() || self.quick.is_some() {
             let _ = self.jobs.send(Job::Tree(repo));
         }
     }
@@ -477,6 +490,24 @@ impl App {
         }
         self.side = Side::Search;
         self.find.focus = true;
+    }
+
+    /// ⌃P: 빠른 열기를 띄운다 (떠 있으면 닫는다). 파일 목록이 없으면 읽어온다.
+    pub fn toggle_quick(&mut self) {
+        if self.quick.take().is_some() || self.repo.is_none() {
+            return;
+        }
+        self.quick = Some(Quick { focus: true, ..Default::default() });
+        if self.tree.is_none() {
+            self.refresh_files();
+        }
+        self.update_quick();
+    }
+
+    pub fn update_quick(&mut self) {
+        let (Some(q), Some(Ok(tree))) = (self.quick.as_mut(), &self.tree) else { return };
+        q.hits = tree.fuzzy(&q.query, 50);
+        q.sel = q.sel.min(q.hits.len().saturating_sub(1));
     }
 
     /// 검색어를 고치면 입력이 잠깐 멈출 때까지 기다렸다가 찾는다 (타자마다 git을 돌리지 않게).
@@ -797,6 +828,7 @@ impl App {
                     self.tree = Some(result);
                     self.update_tree_matches();
                     self.update_find_names();
+                    self.update_quick();
                 }
                 Reply::File(repo, path, result) => {
                     let current = self.file_view.as_mut().filter(|v| v.path == path);
@@ -868,6 +900,13 @@ impl App {
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // 확인 창이 떠 있으면 키는 그 창이 받는다 (Enter 실행, Esc 취소).
         if self.confirm.is_some() || self.leaving.is_some() || self.editor.as_ref().is_some_and(|e| e.conflict) {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::P)) {
+            self.toggle_quick();
+        }
+        // 빠른 열기가 떠 있으면 키(↑↓ Enter Esc)는 그 창이 받는다.
+        if self.quick.is_some() {
             return;
         }
         let typing = ctx.memory(|m| m.focused().is_some());
@@ -993,6 +1032,7 @@ impl eframe::App for App {
             .frame(Frame::new().fill(pal.bg))
             .show(ui, |ui| view::table::show(self, ui));
 
+        view::quick::show(self, ui.ctx());
         view::ops::confirm(self, ui.ctx());
         view::edit::dialogs(self, ui.ctx());
 

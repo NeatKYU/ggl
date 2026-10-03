@@ -9,6 +9,7 @@
 //! [GGL_FILE=경로] 트리에서 그 파일을 연다  [GGL_LINE=줄] 그 줄로 연다
 //! [GGL_FIND=검색어] ⌘⇧F 내용 검색  [GGL_EDIT=1] 연 파일을 편집 모드로  [GGL_TYPE=글자] 편집기 맨 앞에 입력 (저장하지 않음)
 //! [GGL_LEAVE=1] 그다음 파일을 닫으려 해서 "저장하지 않은 변경" 확인 창을 띄운다
+//! [GGL_QUICK=검색어] ⌃P 빠른 열기를 띄우고 입력한다  [GGL_QUICK_SEL=번호] 그 결과를 고른다
 //! 데이터(와 상세)가 다 불러와지면 화면을 저장하고 종료한다.
 
 use std::sync::Mutex;
@@ -114,10 +115,18 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
             if let Some(row) = std::env::var("GGL_SELECT").ok().and_then(|s| s.parse().ok()) {
                 app.select_row(row);
             }
+            if let Ok(text) = std::env::var("GGL_QUICK") {
+                app.toggle_quick();
+                if let Some(q) = app.quick.as_mut() {
+                    q.query = text;
+                    q.sel = std::env::var("GGL_QUICK_SEL").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                app.update_quick();
+            }
             STAGE.store(1, Ordering::Relaxed);
         }
         1 if app.fetch_state == crate::app::FetchState::Running || app.loading => {}
-        1 if app.settings.show_files && app.tree.is_none() => {}
+        1 if (app.settings.show_files || app.quick.is_some()) && app.tree.is_none() => {}
         1 if app.find.running => {}
         1 if (app.selected.is_none() || app.details.is_some()) && waited(ui) => {
             let file = std::env::var("GGL_FILE").ok();

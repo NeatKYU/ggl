@@ -3,6 +3,7 @@ pub mod diff;
 pub mod edit;
 pub mod files;
 pub mod ops;
+pub mod quick;
 pub mod search;
 pub mod table;
 pub mod toolbar;

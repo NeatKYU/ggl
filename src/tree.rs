@@ -132,6 +132,78 @@ impl FileTree {
         by_name.truncate(limit);
         by_name
     }
+
+    /// 빠른 열기(⌃P): `query`의 글자가 경로에 차례대로 들어 있는 파일을 잘 맞는 순서로 (VS Code의 ⌘P처럼).
+    /// 파일 이름에서 맞은 것, 글자가 이어서 맞은 것, 단어 첫 글자에서 맞은 것이 앞에 온다.
+    /// 검색어가 비어 있으면 커밋 안 한 변경이 있는 파일이 먼저 온다.
+    pub fn fuzzy(&self, query: &str, limit: usize) -> Vec<Hit> {
+        let q: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
+        let files = self.nodes.iter().enumerate().filter(|(_, n)| !n.dir);
+        let mut hits: Vec<(i32, Hit)> = if q.is_empty() {
+            files.map(|(i, n)| (if n.status.is_some() { 1 } else { 0 }, Hit { node: i, marks: Vec::new() })).collect()
+        } else {
+            files
+                .filter_map(|(i, n)| {
+                    // 이름에서 다 맞으면 경로에서 맞은 것보다 앞에 온다. `/`를 넣으면 경로로 찾는다.
+                    let in_name = if q.contains(&'/') { None } else { subsequence(&n.path, n.name_at, &q) };
+                    let (score, marks) = match in_name {
+                        Some((s, m)) => (s + 1000, m),
+                        None => subsequence(&n.path, 0, &q)?,
+                    };
+                    Some((score, Hit { node: i, marks }))
+                })
+                .collect()
+        };
+        // 점수가 같으면 짧은 경로, 그다음 경로 이름순
+        let paths = |h: &Hit| &self.nodes[h.node].path;
+        hits.sort_by(|(sa, a), (sb, b)| {
+            sb.cmp(sa).then(paths(a).len().cmp(&paths(b).len())).then_with(|| paths(a).cmp(paths(b)))
+        });
+        hits.truncate(limit);
+        hits.into_iter().map(|(_, h)| h).collect()
+    }
+}
+
+/// 빠른 열기에서 찾은 파일
+pub struct Hit {
+    pub node: usize,
+    /// 경로에서 맞은 글자의 위치 (바이트)
+    pub marks: Vec<usize>,
+}
+
+/// `text[from..]`에 `query`(소문자) 글자가 차례대로 들어 있으면 점수와 맞은 위치.
+/// 글자마다 앞에서부터 맞추되, 단어 첫 글자(`/`·`_`·`-`·`.` 뒤, 대문자)에서 맞는 곳이 가까이 있으면 그쪽을 고른다.
+fn subsequence(text: &str, from: usize, query: &[char]) -> Option<(i32, Vec<usize>)> {
+    let chars: Vec<(usize, char)> = text[from..].char_indices().map(|(i, c)| (i + from, c)).collect();
+    let starts_word = |k: usize| {
+        k == 0 || {
+            let (prev, cur) = (chars[k - 1].1, chars[k].1);
+            matches!(prev, '/' | '_' | '-' | '.' | ' ') || (prev.is_lowercase() && cur.is_uppercase())
+        }
+    };
+    let same = |k: usize, q: char| chars[k].1.to_lowercase().eq(std::iter::once(q));
+    let (mut score, mut marks, mut k) = (0, Vec::with_capacity(query.len()), 0);
+    let mut last: Option<usize> = None;
+    for &q in query {
+        let first = (k..chars.len()).find(|&j| same(j, q))?;
+        // 바로 이어지지 않으면, 남은 곳에서 단어 첫 글자로 맞는 곳을 찾아본다 (`ap` → `app_state`의 a·p보다 `AppState`)
+        let j = if last.is_some_and(|l| l + 1 == first) || starts_word(first) {
+            first
+        } else {
+            (first..chars.len()).find(|&j| same(j, q) && starts_word(j)).unwrap_or(first)
+        };
+        score += 1;
+        if last.is_some_and(|l| l + 1 == j) {
+            score += 5;
+        }
+        if starts_word(j) {
+            score += 3;
+        }
+        marks.push(chars[j].0);
+        last = Some(j);
+        k = j + 1;
+    }
+    Some((score, marks))
 }
 
 #[cfg(test)]
@@ -181,5 +253,31 @@ mod tests {
         let found: Vec<&str> = t.search("main", 10).into_iter().map(|i| t.nodes[i].path.as_str()).collect();
         assert_eq!(found, ["app/main.rs", "x/Main.kt", "main/lib.rs"]);
         assert_eq!(t.nodes[t.search("lib", 1)[0]].folder(), "main");
+    }
+
+    #[test]
+    fn fuzzy_ranks_name_and_word_starts_first() {
+        let t = tree(&[
+            ("src/view/toolbar.rs", None),
+            ("src/app.rs", None),
+            ("docs/application.md", None),
+            ("src/view/app_state.rs", None),
+            ("tests/AppState.kt", None),
+            ("README.md", Some('M')),
+        ]);
+        let found = |q: &str| -> Vec<String> { t.fuzzy(q, 10).iter().map(|h| t.nodes[h.node].path.clone()).collect() };
+        // 이어서 맞은 이름이 먼저, 흩어져 맞은 이름은 뒤에
+        assert_eq!(found("app")[0], "src/app.rs");
+        // 단어 첫 글자: as → app_state, AppState
+        assert_eq!(&found("as")[..2], ["tests/AppState.kt", "src/view/app_state.rs"]);
+        // 이름에 없으면 경로에서 찾는다
+        assert_eq!(found("viewtool"), ["src/view/toolbar.rs"]);
+        assert_eq!(found("src/app"), ["src/app.rs", "src/view/app_state.rs"]);
+        assert!(found("xyz").is_empty());
+        // 빈 검색어면 바뀐 파일이 먼저
+        assert_eq!(found("")[0], "README.md");
+        // 맞은 글자 위치(바이트)
+        let hit = &t.fuzzy("tb", 1)[0];
+        assert_eq!((t.nodes[hit.node].path.as_str(), hit.marks.as_slice()), ("src/view/toolbar.rs", &[9, 13][..]));
     }
 }
