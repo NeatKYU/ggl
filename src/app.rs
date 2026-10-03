@@ -87,7 +87,7 @@ pub struct Find {
     pub names: Vec<usize>,
 }
 
-/// 빠른 열기 (⌃P): 파일 이름 일부로 저장소 파일을 찾아 연다
+/// 빠른 열기 (⌘P): 파일 이름 일부로 저장소 파일을 찾아 연다
 #[derive(Default)]
 pub struct Quick {
     pub query: String,
@@ -492,7 +492,7 @@ impl App {
         self.find.focus = true;
     }
 
-    /// ⌃P: 빠른 열기를 띄운다 (떠 있으면 닫는다). 파일 목록이 없으면 읽어온다.
+    /// ⌘P: 빠른 열기를 띄운다 (떠 있으면 닫는다). 파일 목록이 없으면 읽어온다.
     pub fn toggle_quick(&mut self) {
         if self.quick.take().is_some() || self.repo.is_none() {
             return;
@@ -902,7 +902,7 @@ impl App {
         if self.confirm.is_some() || self.leaving.is_some() || self.editor.as_ref().is_some_and(|e| e.conflict) {
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::P)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::P)) {
             self.toggle_quick();
         }
         // 빠른 열기가 떠 있으면 키(↑↓ Enter Esc)는 그 창이 받는다.
