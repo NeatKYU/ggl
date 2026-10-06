@@ -6,6 +6,7 @@ mod devshot;
 mod edit;
 mod git;
 mod graph;
+mod lines;
 mod ops;
 mod remote;
 mod style;

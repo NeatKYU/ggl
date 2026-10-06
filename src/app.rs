@@ -17,7 +17,8 @@ use crate::graph::{self, Layout, OFFSCREEN};
 use crate::ops::{self, Item, Op};
 use crate::remote::{self, Request};
 use crate::style::Palette;
-use crate::tree::{FileTree, Hit};
+use crate::lines::{Counter, LineCount};
+use crate::tree::{FileTree, Hit, Node};
 use crate::view;
 use crate::watcher::RepoWatcher;
 
@@ -167,6 +168,7 @@ enum Reply {
     Details(PathBuf, String, Result<Details, String>),
     Diff(PathBuf, String, String, Result<Diff, String>),
     Tree(PathBuf, Result<FileTree, String>),
+    Lines(PathBuf, LineCount),
     File(PathBuf, String, Result<Diff, String>),
     Grep(PathBuf, (String, bool), Result<Grep, String>),
 }
@@ -213,6 +215,8 @@ pub struct App {
     pub side: Side,
     pub find: Find,
     pub quick: Option<Quick>,
+    /// 저장소 전체 줄 수 (파일 트리를 읽은 뒤 따로 센다)
+    pub lines: Option<LineCount>,
     /// 아래쪽에서 편집 중인 파일 (`file_view`와 같은 파일)
     pub editor: Option<Editor>,
     /// 저장 안 한 편집이 있어서 확인 창으로 물어보는 중인 이동
@@ -229,6 +233,8 @@ pub struct App {
 
     generation: u64,
     jobs: Sender<Job>,
+    /// 줄 수 세기 (오래 걸릴 수 있어서 작업 스레드와 따로 돈다)
+    lines_tx: Sender<(PathBuf, Vec<String>)>,
     replies: Receiver<Reply>,
     /// 작업 스레드 밖(리모트 새로고침)에서 결과를 보낼 때 쓴다
     reply_tx: Sender<Reply>,
@@ -248,6 +254,7 @@ impl App {
             cc.storage.and_then(|s| eframe::get_value(s, "settings")).unwrap_or_default();
         settings.show_files |= show_files;
         let (jobs, replies, reply_tx) = spawn_worker(cc.egui_ctx.clone());
+        let lines_tx = spawn_line_counter(cc.egui_ctx.clone(), reply_tx.clone());
         let (remote_tx, remote_rx) = mpsc::channel();
         let mut app = Self {
             settings,
@@ -275,6 +282,7 @@ impl App {
             side: Side::Files,
             find: Find::default(),
             quick: None,
+            lines: None,
             editor: None,
             leaving: None,
             search: String::new(),
@@ -285,6 +293,7 @@ impl App {
             scroll_offset: 0.0,
             generation: 0,
             jobs,
+            lines_tx,
             replies,
             reply_tx,
             watcher: None,
@@ -339,6 +348,7 @@ impl App {
         self.file_view = None;
         self.find = Find::default();
         self.quick = None;
+        self.lines = None;
 
         let title = format!("{} — ggl", repo_name(&repo));
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -823,12 +833,23 @@ impl App {
                     // 새 내용이 올 때까지는 이전 내용을 그대로 보여준다.
                     if let (Ok(tree), Some(view)) = (&result, &mut self.file_view) {
                         view.status = tree.nodes.iter().find(|n| !n.dir && n.path == view.path).and_then(|n| n.status);
-                        let _ = self.jobs.send(Job::File(repo, view.path.clone(), view.status));
+                        let _ = self.jobs.send(Job::File(repo.clone(), view.path.clone(), view.status));
+                    }
+                    if let Ok(tree) = &result {
+                        // 줄 수는 저장소에 들어가는 파일만 센다 (.env 같은 무시된 파일과 지운 파일은 뺀다).
+                        let counted = |n: &&Node| !n.dir && !n.ignored && n.status != Some('D');
+                        let paths = tree.nodes.iter().filter(counted).map(|n| n.path.clone());
+                        let _ = self.lines_tx.send((repo, paths.collect()));
                     }
                     self.tree = Some(result);
                     self.update_tree_matches();
                     self.update_find_names();
                     self.update_quick();
+                }
+                Reply::Lines(repo, count) => {
+                    if self.repo.as_ref() == Some(&repo) {
+                        self.lines = Some(count);
+                    }
                 }
                 Reply::File(repo, path, result) => {
                     let current = self.file_view.as_mut().filter(|v| v.path == path);
@@ -1060,6 +1081,23 @@ impl eframe::App for App {
 
 pub fn repo_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// 줄 수를 세는 스레드. 밀린 요청은 가장 최근 것만 센다.
+fn spawn_line_counter(ctx: egui::Context, reply_tx: Sender<Reply>) -> Sender<(PathBuf, Vec<String>)> {
+    let (tx, rx) = mpsc::channel::<(PathBuf, Vec<String>)>();
+    thread::spawn(move || {
+        let mut counter = Counter::default();
+        while let Ok(first) = rx.recv() {
+            let (repo, paths) = rx.try_iter().last().unwrap_or(first);
+            let count = counter.count(&repo, &paths);
+            if reply_tx.send(Reply::Lines(repo, count)).is_err() {
+                return;
+            }
+            ctx.request_repaint();
+        }
+    });
+    tx
 }
 
 fn spawn_worker(ctx: egui::Context) -> (Sender<Job>, Receiver<Reply>, Sender<Reply>) {

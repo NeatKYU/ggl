@@ -127,6 +127,7 @@ pub fn tick(app: &mut App, ui: &egui::Ui) {
         }
         1 if app.fetch_state == crate::app::FetchState::Running || app.loading => {}
         1 if (app.settings.show_files || app.quick.is_some()) && app.tree.is_none() => {}
+        1 if matches!(app.tree, Some(Ok(_))) && app.lines.is_none() => {}
         1 if app.find.running => {}
         1 if (app.selected.is_none() || app.details.is_some()) && waited(ui) => {
             let file = std::env::var("GGL_FILE").ok();

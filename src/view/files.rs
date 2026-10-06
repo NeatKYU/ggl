@@ -14,6 +14,7 @@ use eframe::egui::{
 use crate::app::{App, FileView, Leave, Side};
 use crate::edit::Editor;
 use crate::git::LineKind;
+use crate::lines::{LineCount, thousands};
 use crate::style::{self, LABEL, Palette, SMALL, TEXT, icon, icon_button, icon_toggle};
 use crate::tree::FileTree;
 use crate::view::details::status_style;
@@ -59,17 +60,37 @@ pub fn side(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// 줄 수에 마우스를 올리면 나오는 설명: 확장자별 줄 수
+fn lines_hint(c: &LineCount) -> String {
+    let mut text = format!("텍스트 파일 {}개, {}줄\n", thousands(c.files as u64), thousands(c.total));
+    for (ext, n) in c.by_ext.iter().take(8) {
+        text.push_str(&format!("\n{ext}  {}", thousands(*n)));
+    }
+    if c.by_ext.len() > 8 {
+        let rest: u64 = c.by_ext[8..].iter().map(|(_, n)| n).sum();
+        text.push_str(&format!("\n그 밖  {}", thousands(rest)));
+    }
+    text.push_str("\n\n무시된 파일(.env 등), 바이너리 파일, 잠금 파일(Cargo.lock 등)은 빼고 세요");
+    text
+}
+
 fn tree(app: &mut App, ui: &mut egui::Ui) {
     let pal = Palette::of(ui);
 
     egui::Frame::new().inner_margin(Margin { left: 10, right: 8, top: 4, bottom: 6 }).show(ui, |ui| {
         ui.horizontal(|ui| {
             if let Some(Ok(t)) = &app.tree {
-                let count = match t.changed {
-                    0 => format!("{}개", t.files),
-                    n => format!("{}개 · 바뀜 {n}", t.files),
-                };
-                ui.label(RichText::new(count).small().color(pal.weak));
+                let mut count = format!("{}개", t.files);
+                if t.changed > 0 {
+                    count.push_str(&format!(" · 바뀜 {}", t.changed));
+                }
+                if let Some(c) = &app.lines {
+                    count.push_str(&format!(" · {}줄", thousands(c.total)));
+                }
+                let r = ui.label(RichText::new(count).small().color(pal.weak));
+                if let Some(c) = &app.lines {
+                    r.on_hover_text(lines_hint(c));
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let fold = ui.add_enabled(!app.tree_open.is_empty(), icon_button(icon::COLLAPSE));
