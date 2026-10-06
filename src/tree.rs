@@ -16,6 +16,8 @@ pub struct Node {
     pub status: Option<char>,
     /// 폴더 안에 바뀐 파일 수
     pub changed: usize,
+    /// `.gitignore`에 걸린 파일, 또는 그런 파일만 든 폴더 (흐리게 보여준다)
+    pub ignored: bool,
     children: Vec<usize>,
 }
 
@@ -47,7 +49,8 @@ pub struct FileTree {
 
 impl FileTree {
     pub fn build(files: Vec<TreeFile>) -> Self {
-        let root = Node { path: String::new(), name_at: 0, dir: true, status: None, changed: 0, children: Vec::new() };
+        let root =
+            Node { path: String::new(), name_at: 0, dir: true, status: None, changed: 0, ignored: false, children: Vec::new() };
         let mut tree = FileTree { nodes: vec![root], files: files.len(), changed: 0 };
         let mut dirs: HashMap<String, usize> = HashMap::new();
         for f in files {
@@ -58,7 +61,7 @@ impl FileTree {
                 parent = match dirs.get(dir) {
                     Some(&id) => id,
                     None => {
-                        let id = tree.push(parent, dir.to_string(), true, None);
+                        let id = tree.push(parent, dir.to_string(), true, None, false);
                         dirs.insert(dir.to_string(), id);
                         id
                     }
@@ -71,7 +74,14 @@ impl FileTree {
                     tree.nodes[a].changed += 1;
                 }
             }
-            tree.push(parent, f.path, false, f.status);
+            tree.push(parent, f.path, false, f.status, f.ignored);
+        }
+        // 무시된 파일만 든 폴더도 흐리게. 자식은 늘 부모보다 뒤에 있어서 뒤에서부터 채우면 된다.
+        for i in (1..tree.nodes.len()).rev() {
+            if tree.nodes[i].dir {
+                let children = &tree.nodes[i].children;
+                tree.nodes[i].ignored = !children.is_empty() && children.iter().all(|&c| tree.nodes[c].ignored);
+            }
         }
         let keys: Vec<(bool, String)> = tree.nodes.iter().map(|n| (!n.dir, n.name().to_lowercase())).collect();
         for n in &mut tree.nodes {
@@ -80,10 +90,10 @@ impl FileTree {
         tree
     }
 
-    fn push(&mut self, parent: usize, path: String, dir: bool, status: Option<char>) -> usize {
+    fn push(&mut self, parent: usize, path: String, dir: bool, status: Option<char>, ignored: bool) -> usize {
         let id = self.nodes.len();
         let name_at = path.rfind('/').map_or(0, |i| i + 1);
-        self.nodes.push(Node { path, name_at, dir, status, changed: 0, children: Vec::new() });
+        self.nodes.push(Node { path, name_at, dir, status, changed: 0, ignored, children: Vec::new() });
         self.nodes[parent].children.push(id);
         id
     }
@@ -211,7 +221,7 @@ mod tests {
     use super::*;
 
     fn tree(paths: &[(&str, Option<char>)]) -> FileTree {
-        FileTree::build(paths.iter().map(|&(p, s)| TreeFile { path: p.into(), status: s }).collect())
+        FileTree::build(paths.iter().map(|&(p, s)| TreeFile { path: p.into(), status: s, ignored: false }).collect())
     }
 
     fn labels(t: &FileTree, open: &[&str]) -> Vec<String> {
@@ -236,6 +246,19 @@ mod tests {
         );
         // 합친 줄을 펼치는 열쇠는 맨 아래 폴더다.
         assert_eq!(labels(&t, &["src"]), ["docs", "src/main/java", "a.txt", "README.md"]);
+    }
+
+    #[test]
+    fn dims_folders_that_hold_only_ignored_files() {
+        let files = [("src/a.rs", false), ("src/.env", true), ("secrets/key.json", true), (".env", true)];
+        let t = FileTree::build(
+            files.iter().map(|&(p, ignored)| TreeFile { path: p.into(), status: None, ignored }).collect(),
+        );
+        let ignored = |path: &str| t.nodes.iter().find(|n| n.path == path).map(|n| n.ignored);
+        assert_eq!(ignored("src"), Some(false));
+        assert_eq!(ignored("src/.env"), Some(true));
+        assert_eq!(ignored("secrets"), Some(true));
+        assert_eq!(t.nodes[t.fuzzy("env", 1)[0].node].path, ".env");
     }
 
     #[test]

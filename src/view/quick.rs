@@ -12,7 +12,8 @@ use crate::style::{LABEL, Palette, SMALL, TEXT, icon};
 use crate::tree::Node;
 
 const ROW_H: f32 = 26.0;
-const ROWS: usize = 12;
+/// 창이 작아도 이만큼은 보여준다
+const MIN_ROWS: f32 = 8.0;
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(mut q) = app.quick.take() else { return };
@@ -34,7 +35,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
 
     let id = Id::new("quick-open");
-    let width = (ctx.content_rect().width() - 32.0).clamp(280.0, 620.0);
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 32.0).clamp(280.0, 620.0);
+    // 목록은 창 높이에 맞춰 아래로 길게 (위쪽 52px 아래 남은 높이의 80%에서 입력칸 몫을 뺀 만큼)
+    let list_h = ((screen.height() - 52.0) * 0.8 - 50.0).max(ROW_H * MIN_ROWS);
     let area = egui::Modal::default_area(id).anchor(Align2::CENTER_TOP, vec2(0.0, 52.0));
     let mut changed = false;
     let mut clicked = None;
@@ -73,7 +77,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             return;
         }
         ui.spacing_mut().item_spacing.y = 0.0;
-        ScrollArea::vertical().max_height(ROW_H * ROWS as f32).auto_shrink([false, true]).show(ui, |ui| {
+        // 창(Area)은 지난 프레임 크기만큼만 자리를 주므로, 최소 높이도 같이 줘야 처음부터 길게 열린다.
+        // (안 주면 ScrollArea 기본 최소 높이인 64px, 두 줄 반에서 멈춘다) 결과가 적으면 그만큼만 줄어든다.
+        let scroll = ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h);
+        scroll.auto_shrink([false, true]).show(ui, |ui| {
             let w = ui.available_width();
             for (i, hit) in q.hits.iter().enumerate() {
                 let (rect, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
@@ -126,7 +133,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 /// 한 줄: 파일 이름, 그 뒤에 흐리게 폴더. 맞은 글자는 `mark` 색으로 쓴다.
 fn row(node: &Node, marks: &[usize], width: f32, mark: Color32, pal: &Palette) -> LayoutJob {
-    let name = TextFormat { font_id: FontId::proportional(TEXT), color: pal.text, ..Default::default() };
+    // `.gitignore`에 걸린 파일(.env 등)은 흐리게
+    let color = if node.ignored { pal.weak } else { pal.text };
+    let name = TextFormat { font_id: FontId::proportional(TEXT), color, ..Default::default() };
     let folder = TextFormat { font_id: FontId::proportional(LABEL), color: pal.weak, ..Default::default() };
     let mut job = LayoutJob::default();
     let at = node.path.len() - node.name().len();

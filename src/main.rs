@@ -32,7 +32,9 @@ fn main() -> eframe::Result {
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
 
     // 같은 저장소를 연 창이 이미 있으면 새 창을 띄우지 않는다 (herdr 단축키로 여러 번 열어도 쌓이지 않게).
-    if let Some(repo) = arg_repo.as_deref().and_then(|d| git::toplevel(d).ok()) {
+    // 개발용 화면 캡처는 떠 있는 창을 건드리지 않고 늘 따로 띄운다.
+    let capture = cfg!(feature = "screenshot") && std::env::var_os("GGL_SHOT").is_some();
+    if let Some(repo) = arg_repo.as_deref().filter(|_| !capture).and_then(|d| git::toplevel(d).ok()) {
         let req = if show_files { remote::Request::Files } else { remote::Request::Show };
         if remote::hand_off(&repo, req) {
             return Ok(());

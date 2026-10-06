@@ -176,7 +176,8 @@ fn tree(app: &mut App, ui: &mut egui::Ui) {
                 });
             }
             resp.context_menu(|ui| path_menu(ui, &repo, &node.path, node.dir));
-            resp.on_hover_text(&node.path);
+            let hint = if node.ignored { format!("{}\n.gitignore에 걸려 있어요", node.path) } else { node.path.clone() };
+            resp.on_hover_text(hint);
         }
     });
 
@@ -209,7 +210,8 @@ fn paint_line(p: &egui::Painter, rect: Rect, tree: &FileTree, line: &Line, open:
     }
 
     // 오른쪽 표시: 파일은 상태 글자, 바뀐 파일이 든 폴더는 점
-    let mut name_color = pal.text;
+    // `.gitignore`에 걸린 파일·폴더는 흐리게 (VS Code처럼)
+    let mut name_color = if node.ignored { pal.weak } else { pal.text };
     if let Some(s) = node.status {
         let (letter, color, _) = status_style(s, pal);
         let r = p.text(pos2(right, cy), Align2::RIGHT_CENTER, letter, FontId::monospace(LABEL), color);

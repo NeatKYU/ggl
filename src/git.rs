@@ -825,9 +825,12 @@ pub struct TreeFile {
     pub path: String,
     /// 커밋 안 된 변경 (M, A, D, R, T, U = 추적 안 됨, ! = 충돌). 그대로면 None
     pub status: Option<char>,
+    /// `.gitignore`에 걸린 파일 (.env 등)
+    pub ignored: bool,
 }
 
-/// 파일 트리용 목록: 추적 중인 파일과 무시되지 않은 새 파일. `.gitignore`에 걸린 파일은 빠진다.
+/// 파일 트리용 목록: 추적 중인 파일, 아직 추가 안 한 새 파일, `.gitignore`에 걸린 파일(.env 등).
+/// 통째로 무시된 폴더(node_modules, build …)는 펼치지 않고 뺀다.
 pub fn tree_files(repo: &Path) -> Result<Vec<TreeFile>, String> {
     let listed = git(repo, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
     let mut status = worktree_status(repo);
@@ -836,13 +839,28 @@ pub fn tree_files(repo: &Path) -> Result<Vec<TreeFile>, String> {
     let mut files: Vec<TreeFile> = listed
         .split('\0')
         .filter(|p| !p.is_empty() && seen.insert(*p))
-        .map(|p| TreeFile { path: p.to_string(), status: status.remove(p) })
+        .map(|p| TreeFile { path: p.to_string(), status: status.remove(p), ignored: false })
         .collect();
     // `git rm`으로 지운 파일은 목록에 없지만, 지워진 것도 변경이라 보여준다.
     files.extend(
-        status.into_iter().filter(|(_, s)| *s == 'D').map(|(path, s)| TreeFile { path, status: Some(s) }),
+        status.into_iter().filter(|(_, s)| *s == 'D').map(|(path, s)| TreeFile { path, status: Some(s), ignored: false }),
+    );
+    // `--directory`는 통째로 무시된 폴더를 `node_modules/`처럼 한 줄로 줄여 준다. 그런 폴더는 빼고 파일만 넣는다.
+    let ignored = git(repo, &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
+    let ignored = ignored.unwrap_or_default();
+    files.extend(
+        ignored_files(&ignored)
+            .filter(|p| !seen.contains(p))
+            .map(|p| TreeFile { path: p.to_string(), status: None, ignored: true }),
     );
     Ok(files)
+}
+
+/// 무시된 항목 중 파일만. 폴더(`…/`)와 Finder가 남기는 `.DS_Store`는 뺀다.
+fn ignored_files(out: &str) -> impl Iterator<Item = &str> {
+    out.split('\0')
+        .filter(|p| !p.is_empty() && !p.ends_with('/'))
+        .filter(|p| p.rsplit('/').next() != Some(".DS_Store"))
 }
 
 /// 커밋 안 된 변경이 있는 파일과 그 상태
@@ -1025,6 +1043,12 @@ mod tests {
         assert_eq!(found, [("a.txt", vec![1, 3]), ("new.txt", vec![1])]);
         assert_eq!(grep(&dir, "needle", true).unwrap().lines, 2);
         assert_eq!(grep(&dir, "없는 말", false).unwrap().lines, 0);
+    }
+
+    #[test]
+    fn keeps_ignored_files_but_not_ignored_folders() {
+        let out = ".env\0.DS_Store\0node_modules/\0app/.DS_Store\0app/.env.local\0build/\0";
+        assert_eq!(ignored_files(out).collect::<Vec<_>>(), [".env", "app/.env.local"]);
     }
 
     #[test]
